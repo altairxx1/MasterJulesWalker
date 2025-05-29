@@ -1,5 +1,59 @@
 # MasterJulesWalker - Simplified Agentic Coding Shell
 
+## Quick Start (Steps 1-3 & Settings UI)
+
+This section guides you through running the initial minimal terminal UI.
+
+### Prerequisites
+- Python 3.8+
+- A terminal compatible with `curses` (e.g., most Linux terminals, WSL on Windows).
+
+### Setup and Run
+1.  **Clone the repository (if you haven't already):**
+    ```bash
+    # git clone <repository_url>
+    # cd masterjuleswalker
+    ```
+
+2.  **Navigate to the project directory:**
+    ```bash
+    cd masterjuleswalker 
+    ```
+    (Or whatever your project root folder is named)
+
+3.  **Create and activate a virtual environment:**
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate
+    ```
+    On Windows (in WSL or if using Command Prompt/PowerShell with Python installed):
+    ```bash
+    python -m venv venv
+    venv\Scripts\activate
+    ```
+
+4.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *   **Note on Chat Functionality (Step 3 onwards):** To use the chat features in the "Main" tab, you'll need to set your OpenRouter API key as an environment variable:
+        ```bash
+        export OPENROUTER_API_KEY="your-key-here"
+        ```
+        Refer to the main "Installation & Usage" section for more details on API keys.
+
+5.  Run the application:
+    ```bash
+    python src/main.py
+    ```
+
+6.  Controls:
+    - Use **Left/Right Arrow Keys** to switch between tabs.
+    - Press **'q'** to quit the application.
+    - **Ctrl+C** should also exit gracefully.
+
+---
+
 A barebone, open-source agentic coding assistant that lives in your terminal. Features a dual ASCII UI with interactive buttons and tab system for managing multiple coding contexts.
 
 ## Overview
@@ -218,10 +272,10 @@ python -m masterjuleswalker --project /path/to/project
 
 ### Tab Navigation
 - **Main**: Primary chat interface
-- **Files**: File browser and editor
+- **Files**: Basic file browser. Use Arrow Up/Down to select files/directories. Press Enter on a file to view its content. In the viewer, use Up/Down/PageUp/PageDown to scroll and 'b' to go back to the tree.
 - **Git**: Version control operations
 - **Output**: Command execution results
-- **Settings**: Configuration and preferences
+- **Settings**: Configure MasterJulesWalker. Currently supports setting your OpenRouter API Key and preferred LLM Model Name. Changes are saved to `.mjw_config.json` in the project root.
 
 ### Keyboard Shortcuts
 - `Tab` / `Shift+Tab`: Navigate between UI elements
@@ -231,6 +285,10 @@ python -m masterjuleswalker --project /path/to/project
 - `F1`: Show help
 
 ## Configuration
+
+MasterJulesWalker uses a combination of an application-managed JSON file (for settings configured via the UI) and environment variables.
+
+*(The `.masterjuleswalker.json` file mentioned below, intended for user-defined settings like themes or ignore patterns, is part of a future plan and is **not** currently implemented. The settings described within it are illustrative of what such a file might contain.)*
 
 Create `.masterjuleswalker.json` in your project root:
 ```json
@@ -254,6 +312,14 @@ export MJW_MODEL="google/gemini-2.5-flash-preview-05-20"
 export MJW_MAX_TOKENS="4000"
 export MJW_TEMPERATURE="0.1"
 ```
+
+### Application-Managed Settings (`.mjw_config.json`)
+
+MasterJulesWalker also saves certain settings, like your OpenRouter API Key and preferred Model Name, directly via the "Settings" tab within the application. These are stored in a file named `.mjw_config.json` in the root of the project directory.
+
+**Priority**: Settings from `.mjw_config.json` (managed via the Settings tab) generally take precedence over environment variables if both are set for the same item (e.g. API key).
+
+**Git Ignore**: The `.mjw_config.json` file is included in this project's `.gitignore` file to prevent accidental commits of your local settings and API keys. If you integrate MasterJulesWalker into a larger project, consider adding `.mjw_config.json` to your project's main `.gitignore` file as well.
 
 ## Development Roadmap
 
