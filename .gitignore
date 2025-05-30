@@ -1,1 +1,3 @@
-.mjw_config.json
+*.log
+ignored_dir/
+temp_file.txt

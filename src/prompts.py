@@ -1,16 +1,15 @@
 # Default system prompt for MasterJulesWalker
 DEFAULT_SYSTEM_PROMPT = "You are MasterJulesWalker, a helpful and concise AI coding assistant. Your goal is to assist users with their coding-related questions and tasks."
 
-def format_chat_messages(user_prompt, system_prompt=None, history=None):
+def format_chat_messages(user_prompt, system_prompt=None, history=None, context_string=None): # Added context_string
     """
     Formats messages for the OpenRouter API.
 
     Args:
         user_prompt (str): The user's current message.
         system_prompt (str, optional): The system message. Defaults to DEFAULT_SYSTEM_PROMPT.
-        history (list, optional): A list of previous message objects, e.g.,
-                                  [{"role": "user", "content": "Previous question"},
-                                   {"role": "assistant", "content": "Previous answer"}]
+        history (list, optional): A list of previous message objects.
+        context_string (str, optional): A string containing context from files.
 
     Returns:
         list: A list of message objects formatted for the API.
@@ -19,7 +18,22 @@ def format_chat_messages(user_prompt, system_prompt=None, history=None):
         system_prompt = DEFAULT_SYSTEM_PROMPT
     
     messages = [{"role": "system", "content": system_prompt}]
-    
+
+    if context_string:
+        # Add context as another system message.
+        # Clearer instruction for the LLM on how to use the context.
+        context_system_message = (
+            "The user has provided the following file contents as context. "
+            "Please use this information to inform your response if relevant to the query. "
+            "Do not directly recite or repeat large portions of the context unless specifically asked to summarize or quote. "
+            "If the context seems irrelevant to the current query, you can state that the provided context does not seem to apply. "
+            "Refer to the context as 'the provided file context' if necessary.\n\n"
+            "<context_files>\n"
+            f"{context_string}\n"
+            "</context_files>"
+        )
+        messages.append({"role": "system", "content": context_system_message})
+        
     if history:
         # Ensure history items are correctly formatted (role, content)
         # This is a simple pass-through assuming history is already well-formed.
@@ -77,3 +91,26 @@ if __name__ == "__main__":
     for msg in formatted_messages_4:
         print(msg)
     # Expected: Custom system 4, history[0], history[1], User prompt 4
+
+    # Test case 5: User prompt with context string
+    user_input_5 = "What is the main function in this file?"
+    context_5 = "--- Context File: main.py ---\ndef main():\n  print('Hello')\nmain()\n--- End of Context File: main.py ---"
+    formatted_messages_5 = format_chat_messages(user_input_5, context_string=context_5)
+    print("\nFormatted messages (with context string):")
+    for msg in formatted_messages_5:
+        print(msg)
+    # Expected: System prompt (default), System prompt (context), User prompt 5
+    
+    # Test case 6: User prompt with context, history, and custom system prompt
+    user_input_6 = "Is this efficient?"
+    custom_system_6 = "You are a code reviewer."
+    history_6 = [
+        {"role": "user", "content": "Look at this code."},
+        {"role": "assistant", "content": "Okay, I see the code in the context."} # Simulating prior turn
+    ]
+    context_6 = "--- Context File: script.py ---\nfor i in range(n):\n  for j in range(n):\n    print(i,j)\n--- End of Context File: script.py ---"
+    formatted_messages_6 = format_chat_messages(user_input_6, system_prompt=custom_system_6, history=history_6, context_string=context_6)
+    print("\nFormatted messages (context, history, custom system):")
+    for msg in formatted_messages_6:
+        print(msg)
+    # Expected: Custom system 6, System prompt (context), history[0], history[1], User prompt 6

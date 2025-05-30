@@ -1,9 +1,10 @@
 from .llm import OpenRouterClient
 from .prompts import format_chat_messages, DEFAULT_SYSTEM_PROMPT
 from .config import load_config # To get API key and model for the client
+# No direct import of ui needed here, just passing the reference
 
 class ChatManager:
-    def __init__(self, config=None):
+    def __init__(self, config=None, ui_reference=None): # Added ui_reference
         if config is None:
             config = load_config() 
             
@@ -14,6 +15,8 @@ class ChatManager:
         
         self.llm_client = None
         self.initialization_error = None
+        # Store ui_reference before _initialize_llm_client in case it's ever used there (not currently)
+        self.ui_reference = ui_reference 
         self._initialize_llm_client() # Call new internal method
 
         self.chat_history = [] 
@@ -94,10 +97,15 @@ class ChatManager:
         # For typical chat, user's current message is part of the 'messages' payload
         # but not necessarily part of the 'history' argument to format_chat_messages
         
+        context_string = None
+        if self.ui_reference and hasattr(self.ui_reference, 'get_current_context_for_chat'):
+            context_string = self.ui_reference.get_current_context_for_chat()
+
         messages_payload = format_chat_messages(
             user_prompt=user_input,
             system_prompt=self.system_prompt,
-            history=self.chat_history # Pass the existing history
+            history=self.chat_history, # Pass the existing history
+            context_string=context_string # Pass the retrieved context string
         )
 
         try:
@@ -150,7 +158,9 @@ if __name__ == "__main__":
     if not test_config.get("openrouter_api_key"):
         print("OPENROUTER_API_KEY not set in env. ChatManager will initialize with an error state.")
     
-    chat_manager = ChatManager(config=test_config)
+    # For this standalone test, ui_reference would be None.
+    # In actual app, TerminalUI instance is passed.
+    chat_manager = ChatManager(config=test_config, ui_reference=None) 
 
     if chat_manager.initialization_error:
         print(f"ChatManager initialized with error: {chat_manager.initialization_error}")

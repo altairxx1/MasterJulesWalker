@@ -5,15 +5,18 @@ from .tabs import TabManager
 from . import files
 from . import tree
 from . import viewer
-from .chat import ChatManager # Added
-from .config import load_config, save_setting # Ensure save_setting is imported
+from .context import ContextManager
+from .analyzer import CodeAnalyzer
+from .commands import CommandRunner # Added
+from .chat import ChatManager
+from .config import load_config, save_setting
 
 class TerminalUI:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         app_config = load_config() 
 
-        self.tab_names = ["Main", "Files", "Settings"]
+        self.tab_names = ["Main", "Files", "Commands", "Settings"] # Added "Commands"
         self.tab_manager = TabManager(self.tab_names)
         
         curses.curs_set(0)
@@ -37,10 +40,30 @@ class TerminalUI:
         self.selected_tree_index = 0
         self.tree_top_line_index = 0
         self.active_file_viewer = None
-        self._load_project_files()
+        self._load_project_files() # Sets self.project_root
+
+        # Context Manager
+        self.context_manager = ContextManager(project_root=self.project_root)
+        self.context_status_message = "" # For messages related to context operations
+
+        # Code Analyzer
+        self.code_analyzer = CodeAnalyzer(project_root=self.project_root)
+        self.active_analysis_report = None 
+        self.analysis_display_lines = []   
+        self.analysis_view_top_line = 0    
+
+        # Command Runner
+        self.command_runner = CommandRunner(project_root=self.project_root)
+        self.available_commands = self.command_runner.list_available_commands() # Load once
+        self.selected_command_index = 0
+        self.command_output_lines = []
+        self.command_output_top_line = 0
+        self.command_status_message = "" 
+        self.commands_view_mode = "list" # "list" or "output"
 
         # Main (Chat) tab state
-        self.chat_manager = ChatManager(config=app_config)
+        # Pass a reference to self (TerminalUI instance) for ChatManager to access context
+        self.chat_manager = ChatManager(config=app_config, ui_reference=self)
         self.chat_input_buffer = ""
         self.chat_scroll_top_index = 0 
         self.is_loading_llm_response = False
@@ -126,31 +149,172 @@ class TerminalUI:
             self.stdscr.addstr(input_line_y, 1 + len(prompt_indicator), self.chat_input_buffer[:w - (2 + len(prompt_indicator))])
 
         elif current_active_tab == "Files":
-            # This logic is complex and assumed correct from previous steps
+            # Files Tab Drawing
             if self.file_tab_mode == "tree":
+                # Layout: File tree, then context summary, then context status
+                context_summary_list = self.context_manager.get_context_summary()
+                num_summary_lines = len(context_summary_list)
+                
+                # Calculate heights: status (1 line), summary title (1 if items >0), N summary lines
+                context_area_reserved_height = 1 # For status message / general info line
+                if num_summary_lines > 0:
+                    context_area_reserved_height += 1 # For "--- Context Files ---" title
+                context_area_reserved_height += num_summary_lines
+
+                # tree_view_height is the space left for the actual file tree
+                tree_view_height = (h - content_y_start - 1) - context_area_reserved_height
+                tree_view_height = max(3, tree_view_height) # Ensure tree view has some min height (e.g. 3 lines)
+
+                # Draw File Tree
                 if not self.tree_display_lines:
-                    self.stdscr.addstr(content_y_start, 2, "No files found or error loading tree.")
+                    if content_y_start < h -1: # Ensure there's space to draw this
+                        self.stdscr.addstr(content_y_start, 2, "No files found or error loading tree."[:w-3])
                 else:
-                    max_lines_to_show = h - content_y_start - 1
-                    if self.tree_top_line_index < 0: self.tree_top_line_index = 0
-                    if self.tree_top_line_index >= len(self.tree_display_lines):
-                        self.tree_top_line_index = max(0, len(self.tree_display_lines) - max_lines_to_show)
-                    for i in range(max_lines_to_show):
+                    # Auto-adjust tree_top_line_index to keep selection visible
+                    if self.selected_tree_index >= self.tree_top_line_index + tree_view_height:
+                         self.tree_top_line_index = self.selected_tree_index - tree_view_height + 1
+                    if self.selected_tree_index < self.tree_top_line_index:
+                         self.tree_top_line_index = self.selected_tree_index
+                    
+                    # Clamp tree_top_line_index based on total items and available view height
+                    self.tree_top_line_index = max(0, self.tree_top_line_index)
+                    if len(self.tree_display_lines) > tree_view_height:
+                        self.tree_top_line_index = min(self.tree_top_line_index, len(self.tree_display_lines) - tree_view_height)
+                    else: # Not enough items to scroll, so top is 0
+                        self.tree_top_line_index = 0
+
+                    for i in range(tree_view_height):
                         current_tree_line_idx = self.tree_top_line_index + i
                         if current_tree_line_idx < len(self.tree_display_lines):
-                            line_to_draw = self.tree_display_lines[current_tree_line_idx][:w-2]
+                            line_content = self.tree_display_lines[current_tree_line_idx]
+                            # TODO: Indicate if file is in context e.g. "[CTX] filename"
+                            # This requires generate_tree_display to know about context_manager.context_files
+                            # For now, check here directly (less efficient, but ok for a few context files)
+                            item_path_rel, _ = self.project_items[current_tree_line_idx] # Assuming tree_display_lines maps 1:1 to project_items
+                            abs_item_path = os.path.join(self.project_root, item_path_rel)
+                            prefix = "[CTX] " if abs_item_path in self.context_manager.context_files else ""
+                            line_to_draw = (prefix + line_content)[:w-2] # Apply prefix
+                            
                             attr = self.highlight_attr if current_tree_line_idx == self.selected_tree_index else self.normal_attr
-                            self.stdscr.addstr(content_y_start + i, 1, line_to_draw, attr)
-                        else: break
+                            if content_y_start + i < h -1:
+                                self.stdscr.addstr(content_y_start + i, 1, line_to_draw, attr)
+                        else: break # No more lines in tree_display_lines
+                
+                # Draw Context Summary Area (below tree)
+                context_draw_y_start = content_y_start + tree_view_height
+                
+                if num_summary_lines > 0:
+                    if context_draw_y_start < h -1:
+                        self.stdscr.addstr(context_draw_y_start, 1, "--- Context ('c' to add/remove selected) ---"[:w-2], self.highlight_attr)
+                    context_draw_y_start += 1
+                    for i, summary_line in enumerate(context_summary_list):
+                        if context_draw_y_start + i < h -1: 
+                             self.stdscr.addstr(context_draw_y_start + i, 1, summary_line[:w-2])
+                
+                # Draw Context Status Message / General Info (at the bottom of the reserved context area)
+                info_line_y = content_y_start + tree_view_height + (1 if num_summary_lines > 0 else 0) + num_summary_lines
+                if info_line_y < h -1 : # Ensure it's on screen
+                    current_info_line_content = ""
+                    if self.context_status_message: # Prioritize context status message
+                        current_info_line_content = self.context_status_message
+                        # self.context_status_message = "" # Clear after showing once
+                    else: 
+                        ctx_size_kb = self.context_manager.current_context_size_bytes // 1024
+                        max_ctx_size_kb = ContextManager.MAX_TOTAL_CONTEXT_SIZE_BYTES // 1024
+                        num_ctx_files = len(self.context_manager.context_files)
+                        max_num_files = ContextManager.MAX_CONTEXT_FILES
+                        current_info_line_content = f"Ctx Files: {num_ctx_files}/{max_num_files}, Size: {ctx_size_kb}KB/{max_ctx_size_kb}KB. ('a' to analyze)"
+                    
+                    self.stdscr.addstr(info_line_y, 1, " " * (w - 2)) # Clear previous
+                    self.stdscr.addstr(info_line_y, 1, current_info_line_content[:w-2], self.highlight_attr if self.context_status_message else self.normal_attr)
+
+
             elif self.file_tab_mode == "viewer" and self.active_file_viewer:
-                max_lines_to_show = h - content_y_start - 2 
-                view_lines = self.active_file_viewer.get_display_lines(max_lines_to_show)
+                # Viewer mode takes full height available in content_y_start, less 1 for back_hint
+                viewer_display_height = h - content_y_start - 2 
+                view_lines = self.active_file_viewer.get_display_lines(viewer_display_height)
                 for i, line_content in enumerate(view_lines):
-                    if i < max_lines_to_show:
+                    # Ensure we do not write outside allocated space for viewer content
+                    if i < viewer_display_height and (content_y_start + i < h -1 ) :
                         self.stdscr.addstr(content_y_start + i, 1, line_content[:w-2])
                     else: break
                 back_hint = "[b] Back to tree"
-                self.stdscr.addstr(content_y_start + max_lines_to_show, 2, back_hint, self.highlight_attr)
+                # Ensure back_hint is drawn on its dedicated line
+                if content_y_start + viewer_display_height < h -1:
+                     self.stdscr.addstr(content_y_start + viewer_display_height, 2, back_hint, self.highlight_attr)
+            
+            elif self.file_tab_mode == "analyzer":
+                analyzer_view_height = h - content_y_start - 2 # Reserve 1 line for back hint
+                if not self.analysis_display_lines:
+                    if content_y_start < h -1:
+                         self.stdscr.addstr(content_y_start, 1, "No analysis report to display."[:w-2])
+                else:
+                    # Ensure analysis_view_top_line is valid
+                    if self.analysis_view_top_line < 0: self.analysis_view_top_line = 0
+                    if len(self.analysis_display_lines) > analyzer_view_height:
+                        self.analysis_view_top_line = min(self.analysis_view_top_line, len(self.analysis_display_lines) - analyzer_view_height)
+                    else:
+                        self.analysis_view_top_line = 0 # Not enough lines to scroll
+
+                    for i in range(analyzer_view_height):
+                        current_display_line_idx = self.analysis_view_top_line + i
+                        if current_display_line_idx < len(self.analysis_display_lines):
+                            line_to_draw = self.analysis_display_lines[current_display_line_idx]
+                            if content_y_start + i < h - 1:
+                                self.stdscr.addstr(content_y_start + i, 1, line_to_draw[:w-2])
+                        else:
+                            break # No more lines to draw
+                
+                analysis_hint = "[b] Back to Tree" # Future: "[c] Add to context"
+                if content_y_start + analyzer_view_height < h -1:
+                    self.stdscr.addstr(content_y_start + analyzer_view_height, 2, analysis_hint[:w-2], self.highlight_attr)
+
+        elif current_active_tab == "Commands":
+            if self.commands_view_mode == "list":
+                list_view_height = h - content_y_start - 2 # Reserve 1 for status, 1 for hint
+                self.stdscr.addstr(content_y_start, 1, "Available Commands ('Enter' to run):"[:w-2], self.highlight_attr)
+                
+                # Ensure selected_command_index is valid
+                if self.selected_command_index < 0: self.selected_command_index = 0
+                if self.selected_command_index >= len(self.available_commands):
+                    self.selected_command_index = max(0, len(self.available_commands) -1)
+
+                # Simple scrolling for command list if needed (not implemented for now, assume fits)
+                # For now, just display what fits. Max ~20 commands for typical screen.
+                for i, (name, desc) in enumerate(self.available_commands):
+                    if content_y_start + 1 + i < h - 2:
+                        display_text = f"{name}: {desc}"
+                        attr = self.highlight_attr if i == self.selected_command_index else self.normal_attr
+                        self.stdscr.addstr(content_y_start + 1 + i, 2, display_text[:w-3], attr)
+                
+                if self.command_status_message and content_y_start + 1 + len(self.available_commands) < h -2 :
+                     self.stdscr.addstr(content_y_start + 1 + len(self.available_commands), 1, self.command_status_message[:w-2], self.normal_attr)
+                     # self.command_status_message = "" # Clear after display or keep?
+
+            elif self.commands_view_mode == "output":
+                output_view_height = h - content_y_start - 2 # Reserve 1 line for back hint
+                if not self.command_output_lines:
+                    if content_y_start < h -1:
+                        self.stdscr.addstr(content_y_start, 1, "No output to display."[:w-2])
+                else:
+                    if self.command_output_top_line < 0: self.command_output_top_line = 0
+                    if len(self.command_output_lines) > output_view_height:
+                        self.command_output_top_line = min(self.command_output_top_line, len(self.command_output_lines) - output_view_height)
+                    else:
+                        self.command_output_top_line = 0
+                    
+                    for i in range(output_view_height):
+                        current_display_line_idx = self.command_output_top_line + i
+                        if current_display_line_idx < len(self.command_output_lines):
+                            line_to_draw = self.command_output_lines[current_display_line_idx]
+                            if content_y_start + i < h -1 :
+                                 self.stdscr.addstr(content_y_start + i, 1, line_to_draw[:w-2])
+                        else: break
+                
+                output_hint = "[b] Back to Command List"
+                if content_y_start + output_view_height < h -1:
+                    self.stdscr.addstr(content_y_start + output_view_height, 2, output_hint[:w-2], self.highlight_attr)
+
 
         elif current_active_tab == "Settings":
             y_offset = content_y_start
@@ -285,48 +449,204 @@ class TerminalUI:
                 elif key == curses.KEY_DOWN:
                     if self.selected_tree_index < len(self.project_items) - 1:
                         self.selected_tree_index += 1
-                        if self.selected_tree_index >= self.tree_top_line_index + content_area_height: self.tree_top_line_index = self.selected_tree_index - content_area_height + 1
+                        # _draw_main_content will handle adjusting tree_top_line_index if selection goes out of view
                     self._update_tree_display(); return True
+                elif key == ord('c'): # Add/remove selected file from/to context
+                    if 0 <= self.selected_tree_index < len(self.project_items):
+                        item_path_rel, item_type = self.project_items[self.selected_tree_index]
+                        if item_type == "file":
+                            # Use a local var for status to avoid race if it's cleared quickly by draw loop
+                            current_op_status = ""
+                            # Check if already in context by its absolute path
+                            abs_item_path = os.path.join(self.project_root, item_path_rel)
+                            if abs_item_path in self.context_manager.context_files:
+                                self.context_manager.remove_file(item_path_rel)
+                                current_op_status = self.context_manager.get_latest_error() or f"Removed {os.path.basename(item_path_rel)}"
+                            else:
+                                self.context_manager.add_file(item_path_rel)
+                                current_op_status = self.context_manager.get_latest_error() or f"Added {os.path.basename(item_path_rel)}"
+                            self.context_status_message = current_op_status # Set for display
+                        else:
+                            self.context_status_message = "Cannot add directories to context."
+                        self._update_tree_display() 
+                    return True
+                elif key == ord('a'): # Analyze selected file
+                    if 0 <= self.selected_tree_index < len(self.project_items):
+                        item_path_rel, item_type = self.project_items[self.selected_tree_index]
+                        if item_type == "file" and item_path_rel.endswith(".py"):
+                            self.active_analysis_report = self.code_analyzer.analyze_file(item_path_rel)
+                            if self.active_analysis_report and "error" not in self.active_analysis_report:
+                                formatted_analysis = self.code_analyzer.format_analysis_for_llm(self.active_analysis_report)
+                                self.analysis_display_lines = formatted_analysis.split('\n')
+                                self.file_tab_mode = "analyzer"
+                                self.analysis_view_top_line = 0
+                                self.context_status_message = f"Analyzed: {os.path.basename(item_path_rel)}"
+                            else:
+                                error_msg = self.active_analysis_report.get("error", "Unknown analysis error.")
+                                self.context_status_message = f"Analyze error: {error_msg}"
+                        else:
+                            self.context_status_message = "Select a Python file (.py) to analyze."
+                    return True
+
                 elif key == curses.KEY_ENTER or key == 10 or key == 13: 
                      if 0 <= self.selected_tree_index < len(self.project_items):
                         item_path_rel, item_type = self.project_items[self.selected_tree_index]
-                        if item_type == "file": 
+                        if item_type == "file":
+                            if self.active_file_viewer: # Close previous viewer if any
+                                self.active_file_viewer.close()
                             self.file_tab_mode = "viewer"
                             self.active_file_viewer = viewer.FileViewer(os.path.join(self.project_root, item_path_rel))
                      return True
-                elif self.tab_manager.handle_input(key): return True # Tab switching
+                # elif self.tab_manager.handle_input(key): return True # Tab switching - Handled by global below
 
             elif self.file_tab_mode == "viewer" and self.active_file_viewer:
-                if key == ord('b'): self.file_tab_mode = "tree"; self.active_file_viewer = None; return True
+                if key == ord('b'):
+                    self.active_file_viewer.close()
+                    self.active_file_viewer = None
+                    self.file_tab_mode = "tree"
+                    self.context_status_message = "Closed viewer." # Give some feedback
+                    return True
                 if self.active_file_viewer.handle_input(key, content_area_height): return True
-                elif self.tab_manager.handle_input(key): return True # Tab switching
+                # elif self.tab_manager.handle_input(key): return True # Tab switching - Handled by global below
+            
+            elif self.file_tab_mode == "analyzer":
+                if key == ord('b'):
+                    self.file_tab_mode = "tree"
+                    self.analysis_display_lines = [] # Clear analysis
+                    self.active_analysis_report = None
+                    self.context_status_message = "Closed analyzer."
+                    return True
+                # Scrolling for analysis view
+                analyzer_content_height = max_h - 4 - 2 # h - content_start_y - hint_lines
+                if key == curses.KEY_UP:
+                    if self.analysis_view_top_line > 0: self.analysis_view_top_line -=1
+                    return True
+                elif key == curses.KEY_DOWN:
+                    if self.analysis_view_top_line < len(self.analysis_display_lines) - analyzer_content_height:
+                         self.analysis_view_top_line +=1
+                    return True
+                elif key == curses.KEY_PPAGE:
+                    self.analysis_view_top_line = max(0, self.analysis_view_top_line - analyzer_content_height)
+                    return True
+                elif key == curses.KEY_NPAGE:
+                    self.analysis_view_top_line = min(
+                        len(self.analysis_display_lines) - analyzer_content_height if len(self.analysis_display_lines) > analyzer_content_height else 0,
+                        self.analysis_view_top_line + analyzer_content_height
+                    )
+                    if self.analysis_view_top_line < 0: self.analysis_view_top_line = 0
+                    return True
+                # elif key == ord('c'): # TODO: Add analysis to context manager?
 
-        # Fallback to global tab switching if not handled by specific tab context
-        if self.tab_manager.handle_input(key):
-            if self.tab_manager.get_current_tab() == "Files" and not self.project_items:
+        elif current_active_tab == "Commands":
+            if self.commands_view_mode == "list":
+                if key == curses.KEY_UP:
+                    if self.selected_command_index > 0:
+                        self.selected_command_index -= 1
+                    return True
+                elif key == curses.KEY_DOWN:
+                    if self.selected_command_index < len(self.available_commands) - 1:
+                        self.selected_command_index += 1
+                    return True
+                elif key == curses.KEY_ENTER or key == 10 or key == 13:
+                    if 0 <= self.selected_command_index < len(self.available_commands):
+                        command_name, _ = self.available_commands[self.selected_command_index]
+                        # Clear previous status before running new command
+                        self.command_status_message = f"Running {command_name}..." 
+                        self.command_output_lines = [self.command_status_message] # Show running message immediately
+                        self.commands_view_mode = "output"
+                        self.stdscr.refresh() # Force refresh to show "Running..."
+                        
+                        success, output, error_str = self.command_runner.run_command(command_name)
+                        
+                        if success:
+                            self.command_output_lines = output.split('\n') if output else ["Command ran successfully with no output."]
+                            self.command_status_message = f"'{command_name}' finished."
+                        else:
+                            self.command_output_lines = (error_str.split('\n') if error_str 
+                                                         else [f"Command '{command_name}' failed with no specific error output."])
+                            self.command_status_message = f"Error running '{command_name}'."
+                        self.command_output_top_line = 0
+                    return True
+
+            elif self.commands_view_mode == "output":
+                if key == ord('b'):
+                    self.commands_view_mode = "list"
+                    self.command_output_lines = []
+                    self.command_status_message = "Returned to command list." # Provide feedback
+                    return True
+                # Scrolling for command output
+                cmd_output_content_height = max_h - 4 - 2 # h - content_start_y - hint_lines
+                if key == curses.KEY_UP:
+                    if self.command_output_top_line > 0: self.command_output_top_line -=1
+                    return True
+                elif key == curses.KEY_DOWN:
+                     if self.command_output_top_line < len(self.command_output_lines) - cmd_output_content_height:
+                         self.command_output_top_line +=1
+                     return True
+                elif key == curses.KEY_PPAGE:
+                    self.command_output_top_line = max(0, self.command_output_top_line - cmd_output_content_height)
+                    return True
+                elif key == curses.KEY_NPAGE:
+                    self.command_output_top_line = min(
+                        len(self.command_output_lines) - cmd_output_content_height if len(self.command_output_lines) > cmd_output_content_height else 0,
+                        self.command_output_top_line + cmd_output_content_height
+                    )
+                    if self.command_output_top_line < 0 : self.command_output_top_line = 0
+                    return True
+
+        # Global tab switching (and other global keys if any added later)
+        # Note: tab_manager.handle_input(key) changes the current tab internally.
+        previous_tab = current_active_tab # Tab before potential switch
+        switched_tab = self.tab_manager.handle_input(key) # This attempts to switch tab
+
+        if switched_tab:
+            newly_selected_tab = self.tab_manager.get_current_tab()
+            # If we were in file viewer mode and switched away from Files tab, or are no longer in viewer mode
+            if self.active_file_viewer and (newly_selected_tab != "Files" or self.file_tab_mode != "viewer"):
+                self.active_file_viewer.close()
+                self.active_file_viewer = None
+                # If we switched to Files tab but were previously in viewer mode (e.g. via a direct shortcut not yet impl),
+                # ensure we are back in tree mode. This is defensive.
+                if newly_selected_tab == "Files" and self.file_tab_mode == "viewer":
+                    self.file_tab_mode = "tree"
+
+
+            if newly_selected_tab == "Files" and not self.project_items:
                 self._load_project_files()
-            if self.tab_manager.get_current_tab() == "Settings":
+            if newly_selected_tab == "Settings":
                 current_conf = load_config()
                 self.current_api_key_display = "Loaded (not shown)" if current_conf.get("openrouter_api_key") else "Not set"
                 self.settings_model_input_buffer = current_conf.get("mjw_model", "")
                 self.settings_api_key_input_buffer = "" 
-                self.settings_status_message = "" 
-            return True
+                self.settings_status_message = ""
+            return True # Input was handled by tab switching
             
-        return True
+        return True # Default: input was handled (e.g. by a specific tab, or ignored)
 
     def run_loop(self):
-        # ... (existing run_loop, no changes needed here) ...
         running = True
-        while running:
-            self.stdscr.erase()
-            self._draw_title()
-            self._draw_tabs()
-            self._draw_main_content()
-            self.stdscr.refresh()
-            running = self._handle_input()
-            if not running: break
-            # curses.napms(10) 
+        try:
+            while running:
+                self.stdscr.erase()
+                self._draw_title()
+                self._draw_tabs()
+                self._draw_main_content() # This will now also draw context info
+                self.stdscr.refresh()
+                running = self._handle_input()
+                if not running: break
+                # curses.napms(10) 
+        finally:
+            # Cleanup, important for releasing resources like file handles
+            if self.active_file_viewer:
+                self.active_file_viewer.close() # Already here from previous step
+                self.active_file_viewer = None
+            # Potentially close context_manager if it held resources, but it doesn't currently (no open files)
+
+    # Method to be called by ChatManager to get current context
+    def get_current_context_for_chat(self):
+        if self.context_manager and self.context_manager.context_files:
+            return self.context_manager.get_context_string()
+        return None
 
 def main_ui_runner(stdscr_outer):
     ui = TerminalUI(stdscr_outer)
