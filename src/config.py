@@ -55,11 +55,42 @@ def load_config():
         os.getenv("MJW_MODEL", "google/gemini-flash-1.5-latest") 
     )
     
-    # Max Tokens (example: still from env or default, but could be added to file)
-    config["max_tokens"] = int(os.getenv("MJW_MAX_TOKENS", "4000"))
+    # Max Tokens
+    # Priority: file -> env -> default
+    raw_max_tokens = file_settings.get("max_tokens")
+    if raw_max_tokens is not None:
+        try:
+            config["max_tokens"] = int(raw_max_tokens)
+        except (ValueError, TypeError):
+            # If conversion fails (e.g. "abc" in file), fallback needed
+            env_max_tokens = os.getenv("MJW_MAX_TOKENS")
+            config["max_tokens"] = int(env_max_tokens) if env_max_tokens and env_max_tokens.isdigit() else 4000
+    else:
+        # Fallback to environment variable, then default
+        env_max_tokens = os.getenv("MJW_MAX_TOKENS")
+        # Ensure env_max_tokens is not None and not an empty string before int()
+        config["max_tokens"] = int(env_max_tokens) if env_max_tokens and env_max_tokens.isdigit() else 4000
     
-    # Temperature (example: still from env or default)
-    config["temperature"] = float(os.getenv("MJW_TEMPERATURE", "0.1"))
+    # Temperature
+    # Priority: file -> env -> default
+    raw_temperature = file_settings.get("temperature")
+    if raw_temperature is not None:
+        try:
+            config["temperature"] = float(raw_temperature)
+        except (ValueError, TypeError):
+            # If conversion fails, fallback needed
+            env_temperature = os.getenv("MJW_TEMPERATURE")
+            try: # Try converting env var
+                config["temperature"] = float(env_temperature) if env_temperature else 0.1
+            except (ValueError, TypeError): # If env var also bad or empty
+                config["temperature"] = 0.1 # Hardcoded default
+    else:
+        # Fallback to environment variable, then default
+        env_temperature = os.getenv("MJW_TEMPERATURE")
+        try: # Try converting env var
+            config["temperature"] = float(env_temperature) if env_temperature else 0.1
+        except (ValueError, TypeError): # If env var also bad or empty
+            config["temperature"] = 0.1 # Hardcoded default
     
     return config
 

@@ -17,7 +17,10 @@ class OpenRouterClient:
             raise ValueError("OpenRouter API key is required.")
         
         self.api_key = api_key
-        self.model_name = model_name
+        if model_name is None:
+            self.model_name = "google/gemini-flash-1.5-latest" # Default model
+        else:
+            self.model_name = model_name
         self.headers = {
             **COMMON_HEADERS,
             "Authorization": f"Bearer {self.api_key}",

@@ -43,14 +43,24 @@ class ChatManager:
         key_updated = False
         model_updated = False
 
-        if new_api_key is not None: # Allow empty string to clear key
+        if new_api_key is not None:
             stripped_key = new_api_key.strip()
-            if not stripped_key: # Effectively clearing the key
-                if self.api_key is not None: # Check if it actually changed
+            if not stripped_key: # new_api_key was "" or "  "
+                if self.api_key is not None: # Check if it actually changed from a non-None value
                     key_updated = True
-                self.api_key = None
+                self.api_key = None # Clear the key
             elif self.api_key != stripped_key:
                 self.api_key = stripped_key
+                key_updated = True
+        elif new_api_key is None: # Explicitly passed None to clear
+            if self.api_key is not None: # It's changing from something to None
+                key_updated = True
+            self.api_key = None
+
+        if new_model_name:
+            stripped_model = new_model_name.strip()
+            if stripped_model and self.model_name != stripped_model:
+                self.model_name = stripped_model
                 key_updated = True
         
         if new_model_name:
@@ -104,7 +114,7 @@ class ChatManager:
         messages_payload = format_chat_messages(
             user_prompt=user_input,
             system_prompt=self.system_prompt,
-            history=self.chat_history, # Pass the existing history
+            history=list(self.chat_history), # Pass a copy of the existing history
             context_string=context_string # Pass the retrieved context string
         )
 

@@ -1,0 +1,58 @@
+# Manual Testing Report - MasterJulesWalker AI Coding Assistant
+
+## Testing Environment and Setup:
+- API Key: `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` (set via `OPENROUTER_API_KEY` environment variable).
+- Model: Default (`google/gemini-flash-1.5-latest` as per `src/config.py`).
+- Execution Command: `python3 -m src.main`.
+- Environment: Non-interactive shell provided by the testing tool.
+
+## 1. Application Startup:
+- **Issue**: The application failed to start due to a `curses` library error.
+  - **Error Message**: `A curses error occurred: nocbreak() returned ERR`
+  - **Details**: This indicates that the execution environment does not fully support the `curses` library, which is used for rendering the Terminal User Interface (TUI). The application prints a message advising the user to ensure their terminal supports curses.
+  - **Impact**: Prevents any further interactive testing of the application's UI and features.
+
+## 2. API Key and Model Configuration:
+- The API key was set as an environment variable.
+- The application did not proceed far enough to confirm whether the API key or the default model (`google/gemini-flash-1.5-latest`) were successfully loaded and parsed by the configuration system due to the startup crash.
+
+## 3. Core Feature Testing (Attempted):
+Due to the `curses` error and the inability for the TUI to launch, interactive testing of the following core features was **not possible**:
+
+-   **Chat Tab (Main)**:
+    -   Sending messages to the LLM.
+    -   Receiving and displaying responses.
+    -   Scrolling chat history.
+-   **Files Tab**:
+    -   Navigating the file tree.
+    -   Viewing file content.
+    -   Adding/removing files from context.
+    -   Testing the code analyzer.
+-   **Commands Tab**:
+    -   Listing available commands via UI.
+    -   Running commands via UI.
+-   **Settings Tab**:
+    -   Verifying API key display.
+    *   Updating API key or model name via UI.
+
+## 4. Bugs, Issues, and Missing Functionality:
+
+-   **Major Bug 1: Application crashes in environments not fully supporting `curses`.**
+    -   **Steps to Reproduce**: Run `python3 -m src.main` in a terminal environment that lacks proper `curses` support (like the one used by this testing tool).
+    -   **Behavior**: The application prints a `curses` error and terminates.
+    -   **Expected (enhancement)**: While a TUI needs `curses`, the application could potentially detect a limited environment and:
+        a.  Exit more gracefully with more detailed information or troubleshooting steps.
+        b.  (Ideally, but likely out of scope) Fall back to a very basic command-line interface if TUI cannot initialize.
+    -   **Severity**: High (for users in incompatible terminal environments, the application is unusable).
+
+-   **Usability Issue 1: Dependency on specific terminal capabilities.**
+    -   The application relies heavily on `curses`, making it less portable or accessible in restricted shell environments (e.g., some CI/CD pipelines, basic shells, some IDE integrated terminals if not configured correctly).
+
+-   **Missing Functionality (Untestable due to crash)**:
+    -   Cannot confirm if any of the core UI-dependent features are working.
+
+## 5. Working Features (Based on Startup Attempt):
+-   The application correctly identifies and reports the `curses` initialization error, providing some guidance to the user.
+
+## Conclusion:
+Interactive manual testing of the application's core TUI features is not possible in the current testing environment due to `curses` library incompatibility. The primary finding is the application's hard dependency on a fully functional `curses` environment, leading to a crash if such an environment is not present. No other features could be verified.
