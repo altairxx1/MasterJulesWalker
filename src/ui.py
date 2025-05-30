@@ -227,6 +227,8 @@ class TerminalUI:
                     
                     self.stdscr.addstr(info_line_y, 1, " " * (w - 2)) # Clear previous
                     self.stdscr.addstr(info_line_y, 1, current_info_line_content[:w-2], self.highlight_attr if self.context_status_message else self.normal_attr)
+                    if self.context_status_message == current_info_line_content: # Ensure we only clear if it was the message displayed
+                        self.context_status_message = "" # Clear after display
 
 
             elif self.file_tab_mode == "viewer" and self.active_file_viewer:
@@ -289,7 +291,7 @@ class TerminalUI:
                 
                 if self.command_status_message and content_y_start + 1 + len(self.available_commands) < h -2 :
                      self.stdscr.addstr(content_y_start + 1 + len(self.available_commands), 1, self.command_status_message[:w-2], self.normal_attr)
-                     # self.command_status_message = "" # Clear after display or keep?
+                     self.command_status_message = "" # Clear after display
 
             elif self.commands_view_mode == "output":
                 output_view_height = h - content_y_start - 2 # Reserve 1 line for back hint
@@ -335,6 +337,7 @@ class TerminalUI:
             
             if self.settings_status_message:
                 self.stdscr.addstr(y_offset, 2, self.settings_status_message, self.highlight_attr)
+                self.settings_status_message = "" # Clear after display
 
         else: 
             placeholder_text = f"Content for {current_active_tab} tab (Not yet implemented)."

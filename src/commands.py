@@ -50,23 +50,10 @@ class CommandRunner:
             full_command += " " + args_str
 
         try:
-            # Using shlex.split for better handling of quoted arguments in the base command itself.
-            # However, direct concatenation of args_str is still a simplification.
-            # Popen expects a list of arguments.
-            # For security and correctness, especially with user-provided args,
-            # each part of the command should ideally be an item in the list.
-            # command_parts = shlex.split(base_command)
-            # if args_str:
-            #    command_parts.extend(shlex.split(args_str)) # This might be too naive if args_str is complex
-
-            # Simpler approach for now, assuming base_command is safe and args_str is simple extra flags/paths
-            # This will execute the command through the shell, which handles parsing of the full_command string.
-            # SHELL=TRUE IS A SECURITY RISK if full_command contains untrusted user input.
-            # For predefined internal commands, it's less of an issue but still not best practice.
-            # A safer way is Popen(shlex.split(full_command), ...)
-            
-            # Let's try a safer approach using shlex.split for the whole thing if it's a single string
-            # If base_command already contains tricky shell constructs, this might need refinement.
+            # Using `shlex.split()` for safer command construction.
+            # Ensure `base_command` and `args_str` are handled carefully,
+            # especially if they can include user-influenced input,
+            # though predefined commands here limit that risk.
             
             command_to_run = shlex.split(full_command)
 

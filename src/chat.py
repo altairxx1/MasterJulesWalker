@@ -61,19 +61,15 @@ class ChatManager:
             stripped_model = new_model_name.strip()
             if stripped_model and self.model_name != stripped_model:
                 self.model_name = stripped_model
-                key_updated = True
+                model_updated = True # Corrected: only one block for model update, uses model_updated
         
-        if new_model_name:
-            stripped_model = new_model_name.strip()
-            if stripped_model and self.model_name != stripped_model:
-                self.model_name = stripped_model
-                model_updated = True
-        
-        # Re-initialize if API key was touched, or if only model name changed but client was valid
-        if key_updated or (model_updated and self.llm_client): # Also re-init if model changed and client was ok
+        # Re-initialize if API key was touched, or if model name changed
+        # (regardless of whether client was previously valid, if model changed, re-init)
+        if key_updated or model_updated:
             self._initialize_llm_client()
-        elif key_updated and not self.llm_client and self.api_key : # an API key was added and client was previously None
-             self._initialize_llm_client()
+        # The elif block `elif key_updated and not self.llm_client and self.api_key:` is removed
+        # as its condition is now covered by `if key_updated or model_updated`
+        # if key_updated is true, it will attempt to initialize.
 
 
     def set_system_prompt(self, new_system_prompt):
