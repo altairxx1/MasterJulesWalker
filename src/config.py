@@ -1,7 +1,15 @@
 import os
 import json
+from .search_indexer import SemanticIndexer # Assuming search_indexer.py is in the same directory
+
 
 CONFIG_FILE_PATH = ".mjw_config.json" # In project root
+
+# Initialize SemanticIndexer
+# We'll assume the current working directory is the project root.
+# This might need to be adjusted if the application structure changes.
+PROJECT_ROOT = os.getcwd()
+semantic_indexer = SemanticIndexer(project_root=PROJECT_ROOT)
 
 def _load_from_file():
     """Loads settings from the JSON config file."""

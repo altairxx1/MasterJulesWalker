@@ -41,6 +41,14 @@ class ChatManager:
         self.chat_history = [] 
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
 
+        # State for diffing and applying code suggestions
+        self.last_llm_response_raw: str | None = None
+        self.active_diff_original_content: str | None = None
+        self.active_diff_suggested_content: str | None = None
+        self.active_diff_filepath: str | None = None
+        self.is_diff_active: bool = False
+
+
     def _initialize_llm_client(self):
         """Helper to initialize or re-initialize the LLM client based on current state."""
         if self.api_key:
@@ -172,20 +180,42 @@ class ChatManager:
             if assistant_response:
                 # Add user's message and assistant's response to internal history *after* successful call
                 self.add_message_to_history("user", user_input)
+
+                # Store the raw response before prepending context messages
+                self.last_llm_response_raw = assistant_response
+
                 # Prepend context update message if any files were processed
                 final_response = context_update_message + assistant_response
                 self.add_message_to_history("assistant", final_response) # Store the potentially modified response
                 return final_response
             else:
                 # This case should ideally be covered by exceptions in OpenRouterClient
+                self.last_llm_response_raw = None # Clear if no valid response
                 # If there's a context update message, still return it with the error.
                 return context_update_message + "Error: Received no response or empty response from LLM."
 
         except Exception as e:
+            self.last_llm_response_raw = None # Clear on error
             # Log the full error for debugging if needed: print(f"ChatManager Error: {e}")
             # If there's a context update message, still return it with the error.
             # For the UI, return a user-friendly error message
             return context_update_message + f"Error communicating with LLM: {str(e)}"
+
+    def start_diff_session(self, filepath: str, original_content: str, suggested_content: str):
+        """Stores the content and filepath for an active diff session and flags it."""
+        self.active_diff_filepath = filepath
+        self.active_diff_original_content = original_content
+        self.active_diff_suggested_content = suggested_content
+        self.is_diff_active = True
+        # Potentially, also store the diff lines themselves if that's more convenient for UI
+
+    def clear_diff_session(self):
+        """Clears all state related to an active diff session."""
+        self.active_diff_filepath = None
+        self.active_diff_original_content = None
+        self.active_diff_suggested_content = None
+        self.is_diff_active = False
+        # self.last_llm_response_raw = None # Optionally clear this too, or keep for other uses
 
     def get_formatted_history(self):
         """Returns chat history suitable for display (e.g., list of strings)."""
@@ -459,11 +489,12 @@ if __name__ == "__main__":
         print("ChatManager initialized successfully.")
         
         print("\n--- Test 1: Sending a simple message ---")
-        response1 = chat_manager.send_message("Hello, how are you today?")
+        response1 = chat_manager.send_message("Explain Python's list comprehensions in one sentence.")
         print(f"Response 1: {response1}")
+        print(f"Last LLM raw response: {chat_manager.last_llm_response_raw}")
         
         print("\n--- Test 2: Sending another message (with history) ---")
-        response2 = chat_manager.send_message("What is your name?")
+        response2 = chat_manager.send_message("Give an example.")
         print(f"Response 2: {response2}")
         
         print("\n--- Current Chat History (formatted for display) ---")
@@ -473,6 +504,18 @@ if __name__ == "__main__":
         print("\n--- Test 3: Sending an empty message (should be handled) ---")
         response3 = chat_manager.send_message("   ") # Empty or whitespace
         print(f"Response 3 (empty input): {response3}")
+        self.assertIsNone(chat_manager.last_llm_response_raw, "Last LLM response should be None after empty input")
+
+
+        print("\n--- Test Diff Session ---")
+        chat_manager.start_diff_session("test.py", "original code", "suggested code")
+        assert chat_manager.is_diff_active == True
+        assert chat_manager.active_diff_filepath == "test.py"
+        print("Diff session started.")
+        chat_manager.clear_diff_session()
+        assert chat_manager.is_diff_active == False
+        print("Diff session cleared.")
+
 
         print("\n--- Clearing History ---")
         chat_manager.clear_history()

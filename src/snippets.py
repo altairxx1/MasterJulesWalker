@@ -42,7 +42,7 @@ class SnippetManager:
         """
         try:
             if os.path.exists(self.filepath):
-                with open(self.filepath, 'r') as f:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
                     self.snippets = json.load(f)
                 # Validate basic structure (optional, but good for robustness)
                 for snippet in self.snippets:
@@ -65,7 +65,7 @@ class SnippetManager:
         Prints an error if saving fails.
         """
         try:
-            with open(self.filepath, 'w') as f:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
                 json.dump(self.snippets, f, indent=2)
         except IOError as e:
             print(f"Error: Could not save snippets to {self.filepath}: {e}")
