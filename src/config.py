@@ -60,7 +60,7 @@ def load_config():
     # MJW Model
     config["mjw_model"] = file_settings.get(
         "mjw_model",
-        os.getenv("MJW_MODEL", "google/gemini-flash-1.5-latest") 
+        os.getenv("MJW_MODEL", "google/gemini-2.5-flash")
     )
     
     # Max Tokens

@@ -4,6 +4,8 @@ import time
 import difflib
 import threading
 import logging # Added for logging
+import subprocess
+import shlex
 from .tabs import TabManager
 from . import files
 from . import tree
@@ -75,6 +77,11 @@ class TerminalUI:
         self.is_generating_tests = False
         self.is_requesting_refactor = False
         self.is_fetching_suggestions = False
+
+        # Shell command feature states
+        self.is_waiting_for_shell_command = False
+        self.is_confirming_shell_command = False
+        self.pending_shell_command = None
 
         self.command_runner = CommandRunner(project_root=self.project_root, chat_manager_ref=self.chat_manager)
         self.available_commands = self.command_runner.list_available_commands()
@@ -307,6 +314,14 @@ class TerminalUI:
                          try: self.stdscr.addstr(loading_msg_y , 2, loading_msg[:w-3], self.highlight_attr)
                          except curses.error: pass
                          if chat_display_height > 0 : chat_display_height -=1
+                elif self.is_waiting_for_shell_command:
+                    loading_msg = "MJW is translating to shell command..."
+                    loading_msg_y = input_line_y - 1
+                    if loading_msg_y >= content_y_start and chat_display_height > 0:
+                        try: self.stdscr.addstr(loading_msg_y, 2, loading_msg[:w-3], self.highlight_attr)
+                        except curses.error: pass
+                        if chat_display_height > 0: chat_display_height -=1
+
 
                 num_history_lines = len(chat_history_lines)
                 if num_history_lines <= chat_display_height: self.chat_scroll_top_index = 0
@@ -964,6 +979,25 @@ class TerminalUI:
             # The Commands tab logic also has its error handling.
             # The LLM callbacks also have their error logging.
             elif current_active_tab == "Main":
+                if self.is_confirming_shell_command:
+                    if key == ord('y') or key == ord('Y'):
+                        command_to_run = self.pending_shell_command
+                        self.is_confirming_shell_command = False
+                        self.pending_shell_command = None
+                        self.chat_input_buffer = "" # Clear any 'y' typed
+                        self._execute_shell_command(command_to_run)
+                    elif key == ord('n') or key == ord('N') or key == curses.KEY_ESCAPE:
+                        self.is_confirming_shell_command = False
+                        self.pending_shell_command = None
+                        self.chat_manager.add_message_to_history("MJW-Info", "Command execution cancelled.")
+                        self.chat_input_buffer = "" # Clear any 'n' typed
+                    return True
+
+                if self.is_waiting_for_shell_command: # Block input while waiting
+                    if self.tab_manager.handle_input(key): return True # Allow tab switching
+                    return True
+
+
                 if self.chat_manager.is_diff_active:
                     content_y_start_scroll = 4
                     diff_view_y_start_scroll = content_y_start_scroll + 1
@@ -1006,25 +1040,53 @@ class TerminalUI:
                         if self.chat_scroll_top_index < 0 : self.chat_scroll_top_index =0
                         return True
                     elif key == curses.KEY_ENTER or key == 10 or key == 13:
-                        if self.chat_input_buffer.strip():
-                            self.is_loading_llm_response = True
-                            self.context_status_message = "MJW is thinking..."
-                            current_user_input_for_callback = self.chat_input_buffer.strip()
-                            def _on_chat_message_complete(response_str, error_str):
-                                self.is_loading_llm_response = False
-                                if error_str:
-                                    self.logger.error(f"ChatManager send_message error: {error_str}")
-                                    self.context_status_message = f"Error: {error_str}"
-                                h_cb, w_cb = self.stdscr.getmaxyx()
-                                chat_display_height_cb = (h_cb - 3) - 4
-                                if chat_display_height_cb < 0: chat_display_height_cb = 0
-                                num_history_lines_after = len(self.chat_manager.get_formatted_history())
-                                if num_history_lines_after > chat_display_height_cb:
-                                    self.chat_scroll_top_index = num_history_lines_after - chat_display_height_cb
+                        input_text = self.chat_input_buffer.strip()
+                        if input_text:
+                            if input_text.startswith("!s "):
+                                natural_language_query = input_text[3:].strip()
+                                if natural_language_query:
+                                    self.is_waiting_for_shell_command = True
+                                    self.context_status_message = "Converting to shell command..."
+                                    self.chat_manager.add_message_to_history("User-Query", f"!s {natural_language_query}")
+
+                                    current_working_directory = ""
+                                    files_in_cwd = []
+                                    try:
+                                        current_working_directory = os.getcwd()
+                                        files_in_cwd = os.listdir(current_working_directory)
+                                    except OSError as e:
+                                        self.logger.error(f"OSError getting CWD or listing files: {e}")
+                                        # self.context_status_message remains "Converting..." but callback will handle error
+
+                                    self.chat_manager.translate_to_shell_command(
+                                        natural_language_query,
+                                        current_working_directory,
+                                        files_in_cwd,
+                                        self._on_shell_command_received
+                                    )
+                                    self.chat_input_buffer = ""
                                 else:
-                                    self.chat_scroll_top_index = 0
-                            self.chat_manager.send_message(current_user_input_for_callback, _on_chat_message_complete)
-                            self.chat_input_buffer = ""
+                                    self.chat_manager.add_message_to_history("MJW-Error", "Empty !s query.")
+                                    self.chat_input_buffer = ""
+                            else:
+                                self.is_loading_llm_response = True
+                                self.context_status_message = "MJW is thinking..."
+                                current_user_input_for_callback = input_text
+                                def _on_chat_message_complete(response_str, error_str):
+                                    self.is_loading_llm_response = False
+                                    if error_str:
+                                        self.logger.error(f"ChatManager send_message error: {error_str}")
+                                        self.context_status_message = f"Error: {error_str}"
+                                    h_cb, w_cb = self.stdscr.getmaxyx()
+                                    chat_display_height_cb = (h_cb - 3) - 4
+                                    if chat_display_height_cb < 0: chat_display_height_cb = 0
+                                    num_history_lines_after = len(self.chat_manager.get_formatted_history())
+                                    if num_history_lines_after > chat_display_height_cb:
+                                        self.chat_scroll_top_index = num_history_lines_after - chat_display_height_cb
+                                    else:
+                                        self.chat_scroll_top_index = 0
+                                self.chat_manager.send_message(current_user_input_for_callback, _on_chat_message_complete)
+                                self.chat_input_buffer = ""
                         return True
                     elif key == curses.KEY_BACKSPACE or key == 127: self.chat_input_buffer = self.chat_input_buffer[:-1]; return True
                     elif 32 <= key <= 126: self.chat_input_buffer += chr(key); return True
@@ -1787,6 +1849,87 @@ class TerminalUI:
             return self.context_manager.get_context_string()
         return None
 
+    def _scroll_chat_to_bottom(self):
+        h_cb, w_cb = self.stdscr.getmaxyx()
+        chat_display_height_cb = (h_cb - 3) - 4
+        if chat_display_height_cb < 0: chat_display_height_cb = 0
+        num_history_lines_after = len(self.chat_manager.get_formatted_history())
+        if num_history_lines_after > chat_display_height_cb:
+            self.chat_scroll_top_index = num_history_lines_after - chat_display_height_cb
+        else:
+            self.chat_scroll_top_index = 0
+
+    def _execute_shell_command(self, command_to_run: str):
+        self.chat_manager.add_message_to_history("MJW-Info", f"Executing: {command_to_run}")
+        self._scroll_chat_to_bottom() # Scroll to show "Executing..."
+
+        try:
+            current_working_directory = os.getcwd()
+            # Using shell=True can be a security risk if command_to_run is from an untrusted source.
+            # However, for user-confirmed commands that might involve pipes or complex shell features,
+            # it's often more practical. If commands are simple, shlex.split and shell=False is safer.
+            # Given the LLM generation, shell=True might be more robust for now.
+            # Consider adding a security warning or configuration for this.
+            process = subprocess.Popen(
+                command_to_run, # Using command_to_run directly with shell=True
+                shell=True,    # Allows shell features like pipes, wildcards
+                cwd=current_working_directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8'
+            )
+            stdout, stderr = process.communicate(timeout=30) # 30-second timeout
+
+            if stdout:
+                self.chat_manager.add_message_to_history("MJW-Output", "Output:")
+                for line in stdout.strip().split('\n'):
+                    self.chat_manager.add_message_to_history("MJW-Output", line)
+            if stderr:
+                self.chat_manager.add_message_to_history("MJW-Error", "Error Output:")
+                for line in stderr.strip().split('\n'):
+                    self.chat_manager.add_message_to_history("MJW-Error", line)
+
+            if not stdout and not stderr:
+                self.chat_manager.add_message_to_history("MJW-Info", "Command produced no output.")
+
+        except FileNotFoundError:
+            self.logger.error(f"Shell command not found: {command_to_run}")
+            self.chat_manager.add_message_to_history("MJW-Error", f"Error: Command not found: {command_to_run.split()[0]}")
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Shell command timed out: {command_to_run}")
+            self.chat_manager.add_message_to_history("MJW-Error", "Error: Command timed out (30 seconds).")
+        except Exception as e:
+            self.logger.exception(f"Exception executing shell command '{command_to_run}': {e}")
+            self.chat_manager.add_message_to_history("MJW-Error", f"Error executing command: {str(e)}")
+
+        self._scroll_chat_to_bottom()
+
+
+    def _on_shell_command_received(self, suggested_command_str, error_str):
+        self.is_waiting_for_shell_command = False
+        self.context_status_message = "" # Clear "Converting..." message
+
+        if error_str:
+            self.logger.error(f"Shell command translation error: {error_str}")
+            self.chat_manager.add_message_to_history("MJW-Error", f"Shell translation failed: {error_str}")
+        elif suggested_command_str:
+            if suggested_command_str.startswith("Error:"): # Error from LLM itself
+                self.logger.warning(f"LLM indicated error for shell command: {suggested_command_str}")
+                self.chat_manager.add_message_to_history("MJW-Error", suggested_command_str)
+            else:
+                self.pending_shell_command = suggested_command_str.strip()
+                self.is_confirming_shell_command = True
+                self.chat_manager.add_message_to_history("MJW-Confirm", f"Execute: `{self.pending_shell_command}`? (y/N)")
+                self.logger.info(f"Shell command suggestion received: {self.pending_shell_command}")
+        else:
+            self.logger.warning("Shell command translation returned no command and no error.")
+            self.chat_manager.add_message_to_history("MJW-Error", "Shell translation returned no result.")
+
+        # Auto-scroll chat to show new message/confirmation
+        self._scroll_chat_to_bottom()
+
+
     def _draw_hint_bar(self):
         # ... (content as before)
         h, w = self.stdscr.getmaxyx()
@@ -1812,8 +1955,12 @@ class TerminalUI:
                 tab_specific_hints = "→:Settings to add API Key"
             elif self.chat_manager.is_diff_active:
                 tab_specific_hints = "Scroll:↑/↓ | Cmds:Ctrl+P"
+            elif self.is_confirming_shell_command:
+                tab_specific_hints = "Confirm: y/N | Esc:Cancel"
+            elif self.is_waiting_for_shell_command:
+                tab_specific_hints = "Waiting for shell command... (Tab to switch)"
             else:
-                tab_specific_hints = "Enter:Send | Hist:↑/↓ | Cmds:Ctrl+P"
+                tab_specific_hints = "Enter:Send | !s <query>:Shell | Hist:↑/↓"
         elif current_tab == "Files":
             if self.file_tab_mode == "tree":
                 filter_hint = "Esc:Clr" if self.file_filter_input_mode else "/:Filter"

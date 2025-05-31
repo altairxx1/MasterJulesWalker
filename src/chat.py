@@ -1,8 +1,9 @@
 import re # Added for @include directive parsing
 import json # For parsing LLM response for command suggestions
 import threading # For background operations
+import time # For sleep in test
 from .llm import OpenRouterClient
-from .prompts import format_chat_messages, DEFAULT_SYSTEM_PROMPT
+from .prompts import format_chat_messages, DEFAULT_SYSTEM_PROMPT, format_shell_instruct_prompt
 from .config import load_config # To get API key and model for the client
 # No direct import of ui needed here, just passing the reference
 
@@ -387,6 +388,65 @@ class ChatManager:
 
         if callback: callback(refactored_code_str, error_str)
 
+    def translate_to_shell_command(self, natural_language_input: str, current_working_directory: str, files_in_cwd: list[str], callback):
+        """
+        Translates natural language input to a shell command in a background thread.
+        The callback is invoked with (shell_command_str, error_str).
+        """
+        thread = threading.Thread(
+            target=self._translate_to_shell_command_work,
+            args=(natural_language_input, current_working_directory, files_in_cwd, callback),
+            daemon=True
+        )
+        thread.start()
+
+    def _translate_to_shell_command_work(self, natural_language_input: str, current_working_directory: str, files_in_cwd: list[str], callback):
+        shell_command_str = None
+        error_str = None
+
+        if self.initialization_error:
+            error_str = f"Shell Translation Error: LLM Client not initialized. {self.initialization_error}"
+            if callback: callback(None, error_str)
+            return
+        if not self.llm_client:
+            error_str = "Shell Translation Error: LLM client not available."
+            if callback: callback(None, error_str)
+            return
+        if not natural_language_input or not natural_language_input.strip():
+            error_str = "Shell Translation Error: Natural language input cannot be empty."
+            if callback: callback(None, error_str)
+            return
+
+        try:
+            messages_payload = format_shell_instruct_prompt(
+                natural_language_input=natural_language_input,
+                current_working_directory=current_working_directory,
+                files_in_cwd=files_in_cwd
+            )
+
+            # Using specific settings for shell command generation
+            # Max tokens can be relatively low for a single command.
+            # Temperature is low for more deterministic output.
+            llm_response = self.llm_client.send_chat_request(
+                messages=messages_payload,
+                max_tokens=250,  # Adjusted for shell commands
+                temperature=0.1 # Low temperature for factual output
+            )
+
+            if llm_response:
+                # Assuming the LLM directly returns the command or an error message
+                if llm_response.startswith("Error:"):
+                    error_str = f"Shell Translation Error: {llm_response}"
+                else:
+                    shell_command_str = llm_response.strip()
+            else:
+                error_str = "Shell Translation Error: Received no response or empty response from LLM."
+
+        except Exception as e:
+            error_str = f"Shell Translation Error: An exception occurred - {str(e)}"
+
+        if callback: callback(shell_command_str, error_str)
+
 
 if __name__ == "__main__":
     # Note: Standalone tests for threaded methods would require time.sleep() or mocks for callbacks.
@@ -433,6 +493,24 @@ if __name__ == "__main__":
 
     # Add a small delay to allow threads to potentially execute and print
     # This is only for basic standalone testing visibility.
-    import time
-    time.sleep(1) # Reduced sleep, as extensive LLM calls are not made without API key
-    print("\nStandalone test sequence finished. Note: Full async behavior/callbacks might need more time or an active API key to manifest.")
+
+    print("\n--- Test (async) shell command translation ---")
+    def shell_callback(command, error):
+        if error:
+            print(f"Shell Callback Error: {error}")
+        else:
+            print(f"Shell Callback Result: '{command}'")
+
+    chat_manager.translate_to_shell_command(
+        natural_language_input="list all python files",
+        current_working_directory="/app/src",
+        files_in_cwd=["main.py", "chat.py", "README.md", "utils.py"],
+        callback=shell_callback
+    )
+    print("Shell command translation requested (async).")
+
+    # Give threads more time to complete for testing, especially if an API key is present
+    # and actual LLM calls are being made.
+    print("\nWaiting for async operations to potentially complete (increase sleep time if testing with live API calls)...")
+    time.sleep(5) # Increased sleep duration
+    print("\nStandalone test sequence finished.")

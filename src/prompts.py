@@ -47,6 +47,49 @@ def format_chat_messages(user_prompt, system_prompt=None, history=None, context_
     
     return messages
 
+
+def format_shell_instruct_prompt(natural_language_input: str, current_working_directory: str, files_in_cwd: list[str]) -> list[dict[str, str]]:
+    """
+    Structures a prompt for Gemini 2.5 Flash to translate natural language to a shell command.
+
+    Args:
+        natural_language_input (str): The user's natural language instruction.
+        current_working_directory (str): The current working directory path.
+        files_in_cwd (list[str]): A list of file and directory names in the CWD.
+
+    Returns:
+        list: A list of message dictionaries suitable for the OpenRouter API.
+    """
+    system_message_content = (
+        "You are an AI assistant that translates natural language instructions into "
+        "executable shell commands for a Linux environment. Prioritize safety. "
+        "If a command is destructive (e.g., deletes files without confirmation, "
+        "modifies system-critical files) or ambiguous, respond with "
+        "'Error: Cannot translate instruction.' "
+        "Only provide a single, valid shell command as output, without any explanation or preamble."
+    )
+
+    files_summary_limit = 15
+    if len(files_in_cwd) > files_summary_limit:
+        files_in_cwd_summary = files_in_cwd[:files_summary_limit] + [f"... and {len(files_in_cwd) - files_summary_limit} more files/directories."]
+    else:
+        files_in_cwd_summary = files_in_cwd
+
+    files_listing = ", ".join(files_in_cwd_summary) if files_in_cwd_summary else "No files or directories listed."
+
+    user_message_content = (
+        f"Current working directory: {current_working_directory}\n"
+        f"Files in directory: {files_listing}\n\n"
+        "Translate the following user instruction into a single, valid shell command.\n\n"
+        f'User Instruction: "{natural_language_input}"\n'
+        "Shell Command:"
+    )
+
+    return [
+        {"role": "system", "content": system_message_content},
+        {"role": "user", "content": user_message_content}
+    ]
+
 if __name__ == "__main__":
     print("Testing prompt formatting...")
 
@@ -114,3 +157,35 @@ if __name__ == "__main__":
     for msg in formatted_messages_6:
         print(msg)
     # Expected: Custom system 6, System prompt (context), history[0], history[1], User prompt 6
+
+    print("\nTesting shell instruct prompt formatting...")
+
+    # Test case 7: Basic shell command translation
+    nl_input_1 = "list all files in long format"
+    cwd_1 = "/home/user/projects"
+    files_1 = ["README.md", "script.py", "data.txt", "image.png", "another_script.sh"]
+    shell_prompt_1 = format_shell_instruct_prompt(nl_input_1, cwd_1, files_1)
+    print("\nFormatted shell instruct prompt (basic):")
+    for msg in shell_prompt_1:
+        print(msg)
+    # Expected: System message (shell-focused), User message with NL input, CWD, and files.
+
+    # Test case 8: Shell command with many files (summarization)
+    nl_input_2 = "count lines in all .py files"
+    cwd_2 = "/home/user/scripts"
+    files_2 = [f"file_{i}.txt" for i in range(20)] + ["my_script.py", "another.py"]
+    shell_prompt_2 = format_shell_instruct_prompt(nl_input_2, cwd_2, files_2)
+    print("\nFormatted shell instruct prompt (file summarization):")
+    for msg in shell_prompt_2:
+        print(msg)
+    # Expected: System message, User message with NL input, CWD, and summarized file list.
+
+    # Test case 9: Shell command with no files in CWD
+    nl_input_3 = "create a new directory called 'test_dir'"
+    cwd_3 = "/tmp"
+    files_3 = []
+    shell_prompt_3 = format_shell_instruct_prompt(nl_input_3, cwd_3, files_3)
+    print("\nFormatted shell instruct prompt (no files):")
+    for msg in shell_prompt_3:
+        print(msg)
+    # Expected: System message, User message with NL input, CWD, and "No files" message.
