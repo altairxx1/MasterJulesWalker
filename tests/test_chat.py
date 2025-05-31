@@ -675,6 +675,129 @@ class TestChatManager(unittest.TestCase):
         response = self.chat_manager.request_command_suggestions(context_signals)
         self.assertEqual(response, [])
 
+    # --- Tests for request_refactor ---
+
+    def test_request_refactor_success_and_prompt_construction(self):
+        code_snippet = "def f():\n    pass"
+        refactor_operation = "Make it awesome"
+        language = "python"
+        expected_refactored_code = "def f_awesome():\n    pass"
+
+        self.mock_llm_client_instance.send_chat_request.return_value = expected_refactored_code
+
+        # format_chat_messages mock from setUp will be used.
+        # It simplifies the payload to:
+        # [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+        response = self.chat_manager.request_refactor(code_snippet, refactor_operation, language)
+        self.assertEqual(response, expected_refactored_code)
+
+        self.mock_llm_client_instance.send_chat_request.assert_called_once()
+        args, kwargs = self.mock_llm_client_instance.send_chat_request.call_args
+        self.assertIn("messages", kwargs)
+        messages_payload = kwargs["messages"]
+
+        system_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "system"), None)
+        user_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "user"), None)
+
+        self.assertIsNotNone(system_prompt_payload)
+        self.assertIn("You are an expert code refactoring assistant.", system_prompt_payload["content"])
+        self.assertIn(f"(language: {language})", system_prompt_payload["content"])
+        self.assertIn("provide only the refactored code block.", system_prompt_payload["content"])
+
+        self.assertIsNotNone(user_prompt_payload)
+        expected_user_prompt_content = (
+            f"Refactor this {language} code by applying the '{refactor_operation}' operation:\n\n"
+            f"```{language}\n{code_snippet}\n```"
+        )
+        self.assertEqual(user_prompt_payload["content"], expected_user_prompt_content)
+
+        self.assertEqual(kwargs.get("max_tokens"), 1500)
+        self.assertEqual(kwargs.get("temperature"), 0.5)
+
+    def test_request_refactor_markdown_stripping(self):
+        code_snippet = "let x = 1;"
+        refactor_op = "Convert to const"
+        language = "javascript"
+
+        # Test with ```javascript ... ```
+        self.mock_llm_client_instance.send_chat_request.return_value = "```javascript\nconst x = 1;\n```"
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op, language)
+        self.assertEqual(response, "const x = 1;")
+        self.mock_llm_client_instance.send_chat_request.reset_mock()
+
+        # Test with ``` ... ``` (no language specified)
+        self.mock_llm_client_instance.send_chat_request.return_value = "```\nconst x = 1;\n```"
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op, language)
+        self.assertEqual(response, "const x = 1;")
+        self.mock_llm_client_instance.send_chat_request.reset_mock()
+
+        # Test with just the code (no markdown) - should remain unchanged
+        self.mock_llm_client_instance.send_chat_request.return_value = "const x = 1;"
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op, language)
+        self.assertEqual(response, "const x = 1;")
+
+
+    def test_request_refactor_llm_errors(self):
+        code_snippet = "FAIL ME"
+        refactor_op = "Test error handling"
+
+        # ValueError from LLM client
+        self.mock_llm_client_instance.send_chat_request.side_effect = ValueError("LLM hiccup")
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op)
+        self.assertEqual(response, "# Error: LLM request failed. LLM hiccup")
+        self.mock_llm_client_instance.send_chat_request.reset_mock() # Reset side_effect for next test
+        self.mock_llm_client_instance.send_chat_request.side_effect = None
+
+
+        # RequestException from LLM client
+        from requests.exceptions import RequestException
+        self.mock_llm_client_instance.send_chat_request.side_effect = RequestException("Network issue")
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op)
+        self.assertEqual(response, "# Error: LLM request failed. Network issue")
+        self.mock_llm_client_instance.send_chat_request.reset_mock()
+        self.mock_llm_client_instance.send_chat_request.side_effect = None
+
+
+    def test_request_refactor_empty_or_none_llm_response(self):
+        code_snippet = "data = [1,2,3]"
+        refactor_op = "Make it better"
+
+        self.mock_llm_client_instance.send_chat_request.return_value = None
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op)
+        self.assertEqual(response, "# Error: LLM request failed. Received no response or empty response.")
+        self.mock_llm_client_instance.send_chat_request.reset_mock()
+
+        self.mock_llm_client_instance.send_chat_request.return_value = ""
+        response = self.chat_manager.request_refactor(code_snippet, refactor_op)
+        self.assertEqual(response, "# Error: LLM request failed. Received no response or empty response.")
+
+
+    def test_request_refactor_no_llm_client(self):
+        original_client = self.chat_manager.llm_client
+        original_init_error = self.chat_manager.initialization_error
+        self.chat_manager.llm_client = None
+        self.chat_manager.initialization_error = "Test init error for refactor"
+
+        response = self.chat_manager.request_refactor("some code", "some op")
+        self.assertEqual(response, f"# Error: LLM Client not initialized. {self.chat_manager.initialization_error}")
+
+        self.chat_manager.llm_client = original_client
+        self.chat_manager.initialization_error = original_init_error
+
+    def test_request_refactor_input_validation(self):
+        # Empty code snippet
+        response = self.chat_manager.request_refactor("", "some_op")
+        self.assertEqual(response, "# Error: Code snippet cannot be empty.")
+        response = self.chat_manager.request_refactor("   ", "some_op")
+        self.assertEqual(response, "# Error: Code snippet cannot be empty.")
+
+        # Empty refactor operation
+        response = self.chat_manager.request_refactor("some_code", "")
+        self.assertEqual(response, "# Error: Refactor operation cannot be empty.")
+        response = self.chat_manager.request_refactor("some_code", "   ")
+        self.assertEqual(response, "# Error: Refactor operation cannot be empty.")
+
 
 if __name__ == '__main__':
     unittest.main()

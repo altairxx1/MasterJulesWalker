@@ -167,6 +167,196 @@ def top_level_func(a, b):
         self.assertNotIn("Functions:", formatted_string)
         self.assertNotIn("Global Variables/Constants:", formatted_string)
 
+    # --- Tests for get_code_element_source ---
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_basic_function(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        code = "def foo():\n    pass\n"
+        mock_file_open.return_value.read.return_value = code
+
+        result = self.analyzer.get_code_element_source("test.py", "foo", "function")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["source_code"], code.strip()) # ast.get_source_segment might strip trailing newlines
+        self.assertEqual(result["start_line"], 1)
+        self.assertEqual(result["end_line"], 2)
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_function_with_decorators(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        code = """
+@my_decorator
+@another_decorator(arg=1)
+def bar(x):
+    return x * 2
+"""
+        # For ast.parse, the decorators must be valid Python expressions or parsable as such.
+        # We'll define dummy decorators for the AST to be happy if it tries to evaluate them,
+        # though get_source_segment primarily cares about line numbers.
+        # For this test, we'll assume the decorators are simple name lookups or calls.
+        # The key is that ast.parse can build a tree from this string.
+        mock_file_open.return_value.read.return_value = code
+
+        result = self.analyzer.get_code_element_source("test.py", "bar", "function")
+        self.assertNotIn("error", result, msg=result.get("error", ""))
+
+        expected_source = code.strip() # ast.get_source_segment will get the whole decorated block
+        self.assertEqual(result["source_code"], expected_source)
+        self.assertEqual(result["start_line"], 2) # AST node for function `bar` starts after comments/blanks
+        self.assertEqual(result["end_line"], 5)
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_basic_class(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        code = """
+class MySpam:
+    eggs_count = 0
+    def cook(self):
+        pass
+"""
+        mock_file_open.return_value.read.return_value = code
+        result = self.analyzer.get_code_element_source("test.py", "MySpam", "class")
+        self.assertNotIn("error", result, msg=result.get("error", ""))
+        self.assertEqual(result["source_code"], code.strip())
+        self.assertEqual(result["start_line"], 2)
+        self.assertEqual(result["end_line"], 5)
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_method_in_class(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        class_code = """
+class MySpam:
+    eggs_count = 0
+    def cook(self): # target method
+        pass
+    def eat(self):
+        return "yum"
+"""
+        method_code = """def cook(self): # target method
+        pass""" # Note: ast.get_source_segment might not perfectly re-indent a method if it's the only thing extracted.
+                      # It aims to get the exact characters from the original source.
+
+        mock_file_open.return_value.read.return_value = class_code
+        result = self.analyzer.get_code_element_source("test.py", "cook", "function") # Methods are type "function"
+
+        self.assertNotIn("error", result, msg=result.get("error", ""))
+
+        # ast.get_source_segment should preserve original indentation and content
+        expected_source_lines = class_code.splitlines()[3:5] # Lines for 'def cook...' and '    pass'
+        expected_source = "\n".join(l.strip() if i == 0 else l for i, l in enumerate(expected_source_lines)) # Strip first line only for direct comparison
+
+        # Simpler check: ensure the core definition is there
+        self.assertIn("def cook(self):", result["source_code"])
+        self.assertIn("pass", result["source_code"])
+
+        self.assertEqual(result["start_line"], 4) # Line of 'def cook(self):'
+        self.assertEqual(result["end_line"], 5)   # Line of '    pass'
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_async_function(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        # Dummy asyncio for AST parsing if needed, though not strictly for source extraction
+        code = "import asyncio\n\nasync def my_async_func():\n    await asyncio.sleep(0)\n"
+        mock_file_open.return_value.read.return_value = code
+
+        result = self.analyzer.get_code_element_source("test.py", "my_async_func", "function")
+        self.assertNotIn("error", result)
+        # ast.get_source_segment should return the exact segment
+        self.assertEqual(result["source_code"], "async def my_async_func():\n    await asyncio.sleep(0)")
+        self.assertEqual(result["start_line"], 3)
+        self.assertEqual(result["end_line"], 4)
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open, read_data="def foo(): pass")
+    def test_get_element_source_element_not_found(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        result = self.analyzer.get_code_element_source("test.py", "non_existent_func", "function")
+        self.assertIn("error", result)
+        self.assertIn("not found", result["error"])
+
+    @patch('os.path.isfile', return_value=False)
+    def test_get_element_source_file_not_found(self, mock_isfile):
+        result = self.analyzer.get_code_element_source("test.py", "foo", "function")
+        self.assertIn("error", result)
+        self.assertEqual(result["error"], "File not found: test.py")
+
+    @patch('os.path.isfile', return_value=True)
+    def test_get_element_source_not_python_file(self, mock_isfile):
+        result = self.analyzer.get_code_element_source("test.txt", "foo", "function")
+        self.assertIn("error", result)
+        self.assertEqual(result["error"], "Not a Python file.")
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open, read_data="def func(\n  return 1") # Syntax error
+    def test_get_element_source_syntax_error_in_file(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        result = self.analyzer.get_code_element_source("syntax.py", "func", "function")
+        self.assertIn("error", result)
+        self.assertTrue(result["error"].startswith("Error parsing file syntax.py:"))
+
+    @patch('os.path.isfile')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_get_element_source_start_end_lines_complex_structure(self, mock_file_open, mock_isfile):
+        mock_isfile.return_value = True
+        code = """# Comment line 1
+# Comment line 2
+import os
+
+class MyClass: # Line 5
+    \"\"\"Docstring for class\"\"\" # Line 6
+
+    class_var = 100 # Line 8
+
+    def __init__(self, val): # Line 10
+        self.val = val # Line 11
+
+    @classmethod # Line 13
+    def a_classmethod(cls, data): # Line 14
+        \"\"\"Docstring for method\"\"\" # Line 15
+        if data > 0: # Line 16
+            return True # Line 17
+        else: # Line 18
+            return False # Line 19
+
+def another_func(): # Line 21
+    pass # Line 22
+"""
+        mock_file_open.return_value.read.return_value = code
+
+        # Test MyClass
+        class_result = self.analyzer.get_code_element_source("test.py", "MyClass", "class")
+        self.assertNotIn("error", class_result, msg=class_result.get("error",""))
+        self.assertEqual(class_result["start_line"], 5)
+        # ast.get_source_segment includes everything until the start of the next node or EOF
+        # In this case, it goes up to line 19 (the end of the last method in the class)
+        self.assertEqual(class_result["end_line"], 19)
+        self.assertIn("class MyClass:", class_result["source_code"])
+        self.assertIn("class_var = 100", class_result["source_code"])
+        self.assertIn("def a_classmethod(cls, data):", class_result["source_code"])
+        self.assertIn("return False", class_result["source_code"])
+
+
+        # Test a_classmethod (decorated method)
+        method_result = self.analyzer.get_code_element_source("test.py", "a_classmethod", "function")
+        self.assertNotIn("error", method_result, msg=method_result.get("error",""))
+        self.assertEqual(method_result["start_line"], 13) # Includes @classmethod decorator
+        self.assertEqual(method_result["end_line"], 19)
+        self.assertIn("@classmethod", method_result["source_code"])
+        self.assertIn("def a_classmethod(cls, data):", method_result["source_code"])
+        self.assertIn("return False", method_result["source_code"])
+
+        # Test another_func
+        func_result = self.analyzer.get_code_element_source("test.py", "another_func", "function")
+        self.assertNotIn("error", func_result, msg=func_result.get("error",""))
+        self.assertEqual(func_result["start_line"], 21)
+        self.assertEqual(func_result["end_line"], 22)
+        self.assertEqual(func_result["source_code"].strip(), "def another_func(): # Line 21\n    pass")
+
 
 if __name__ == '__main__':
     unittest.main()

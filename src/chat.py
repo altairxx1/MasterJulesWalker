@@ -377,6 +377,67 @@ class ChatManager:
             # print(f"Cmd Suggestion LLM Error: {e}")
             return []
 
+    def request_refactor(self, code_snippet: str, refactor_operation: str, language: str = "python") -> str:
+        """
+        Requests the LLM to refactor a given code snippet.
+
+        Args:
+            code_snippet (str): The code snippet to refactor.
+            refactor_operation (str): The refactoring operation to perform (e.g., "Identify Anti-Patterns").
+            language (str, optional): The programming language of the code. Defaults to "python".
+
+        Returns:
+            str: The refactored code snippet from the LLM, or an error string
+                 like "# Error: LLM request failed." if an error occurs.
+        """
+        if self.initialization_error:
+            return f"# Error: LLM Client not initialized. {self.initialization_error}"
+        if not self.llm_client:
+            return "# Error: LLM client not available for refactoring."
+        if not code_snippet or not code_snippet.strip():
+            return "# Error: Code snippet cannot be empty."
+        if not refactor_operation or not refactor_operation.strip():
+            return "# Error: Refactor operation cannot be empty."
+
+        system_prompt_refactor = (
+            "You are an expert code refactoring assistant. Given the following code "
+            f" (language: {language}) and a refactoring instruction, provide only the refactored code block. "
+            "Do not add any explanations or markdown formatting around the code. "
+            "Preserve original indentation for the block if possible, or ensure the new code is correctly indented."
+        )
+
+        user_prompt_refactor = (
+            f"Refactor this {language} code by applying the '{refactor_operation}' operation:\n\n"
+            f"```{language}\n{code_snippet}\n```"
+        )
+
+        messages_payload = format_chat_messages(
+            user_prompt=user_prompt_refactor,
+            system_prompt=system_prompt_refactor,
+            history=[], # No chat history for refactoring requests to keep them isolated
+            context_string=None
+        )
+
+        try:
+            # Using parameters suitable for code generation/modification
+            refactored_code = self.llm_client.send_chat_request(
+                messages=messages_payload,
+                max_tokens=1500,  # Allow ample space for refactored code
+                temperature=0.5   # Balance creativity and determinism
+            )
+
+            if refactored_code:
+                # Remove potential markdown code block fences if LLM adds them despite instructions
+                # Common patterns: ```python\n...\n``` or ```\n...\n```
+                refactored_code = re.sub(r'^```(?:python|)\s*\n', '', refactored_code, flags=re.MULTILINE)
+                refactored_code = re.sub(r'\n```\s*$', '', refactored_code, flags=re.MULTILINE)
+                return refactored_code.strip() # Return stripped code
+            else:
+                return "# Error: LLM request failed. Received no response or empty response."
+        except Exception as e:
+            return f"# Error: LLM request failed. {str(e)}"
+
+
 if __name__ == "__main__":
     print("Testing ChatManager...")
     # This test requires OPENROUTER_API_KEY to be set in environment for live LLM calls

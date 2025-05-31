@@ -140,7 +140,38 @@ class FileViewer:
         
         # Ensure top_line_num doesn't go negative
         if self.top_line_num < 0: self.top_line_num = 0
-    
+
+    def scroll_to_line(self, line_number: int, display_height: int = 20):
+        """
+        Scrolls the view so that the specified line_number is visible,
+        aiming to place it about 1/3 down from the top of the display.
+        line_number is 1-indexed.
+        display_height is the number of lines visible in the viewer.
+        """
+        if self.total_lines == 0 or line_number <= 0:
+            self.top_line_num = 0
+            return
+
+        # Convert 1-indexed line_number to 0-indexed for calculations
+        target_line_0_indexed = line_number - 1
+
+        # Aim to place the target line about 1/3 down the screen
+        # or at least 2 lines from the top, whichever is more appropriate.
+        desired_offset_from_top = min(max(2, display_height // 3), display_height -1)
+
+        new_top_line = max(0, target_line_0_indexed - desired_offset_from_top)
+
+        # Ensure the new_top_line doesn't scroll past the end of the file
+        # such that there are fewer than display_height lines to show (if possible)
+        if self.total_lines > display_height:
+            max_possible_top_line = self.total_lines - display_height
+            self.top_line_num = min(new_top_line, max_possible_top_line)
+        else: # Not enough lines to fill the display_height, so top must be 0
+            self.top_line_num = 0
+
+        # Final check to ensure top_line_num is not negative
+        self.top_line_num = max(0, self.top_line_num)
+
     def close(self):
         """Closes the file handle and clears the cache."""
         if self.file_handle is not None:

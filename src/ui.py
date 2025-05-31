@@ -1,6 +1,7 @@
 import curses
 import os
-import time 
+import time
+import difflib # Added for refactoring diff
 from .tabs import TabManager
 from . import files
 from . import tree
@@ -11,6 +12,7 @@ from .commands import CommandRunner
 from .chat import ChatManager
 from .config import load_config, save_setting
 from .snippets import SnippetManager # Added for Snippets Tab
+from .search_indexer import SemanticIndexer # Added for Semantic Search
 
 class TerminalUI:
     def __init__(self, stdscr):
@@ -100,6 +102,40 @@ class TerminalUI:
         self.current_api_key_display = "Loaded from config (not shown)" if loaded_api_key else "Not set"
         self.settings_status_message = ""
         self.settings_model_input_buffer = app_config.get("mjw_model", "") # Also allow editing model
+
+        # Refactoring State Variables
+        self.refactor_code_item_details = None # Stores {'filepath': str, 'name': str, 'type': str, 'source': str, 'start_line': int, 'end_line': int}
+        self.available_refactorings = [
+            "Identify Anti-Patterns",
+            "Suggest Optimizations",
+            "Convert to List Comprehension",
+            "Extract Variable",
+            "Generate Docstring (Python)"
+        ]
+        self.selected_refactoring_index = 0
+        self.refactor_diff_lines = []
+        self.is_requesting_refactor = False
+        self.original_code_snippet = ""
+        self.refactored_code_suggestion = ""
+
+        # Semantic Search State
+        self.search_indexer = SemanticIndexer(project_root=self.project_root)
+        self.search_init_error = self.search_indexer.initialization_error
+        if not self.search_init_error:
+            # Try to load existing index, don't block UI if it fails for now
+            # Errors during load will be printed by SemanticIndexer.load_index()
+            self.search_indexer.load_index()
+        else:
+            # Store this to potentially display in UI that search is unavailable
+            self.context_status_message = f"Search Indexer Error: {self.search_init_error}"
+
+        self.search_query_input_buffer = ""
+        self.original_search_query = "" # Stores the query that produced current results
+        self.search_results_list = []
+        self.selected_search_result_index = 0
+        self.search_results_top_line = 0
+        self.search_status_message = ""
+
 
     def _get_context_signals(self):
         signals = {
@@ -273,13 +309,18 @@ class TerminalUI:
                         # self.context_status_message = "" # Clear after showing once
                     else: 
                         ctx_size_kb = self.context_manager.current_context_size_bytes // 1024
-                        max_ctx_size_kb = ContextManager.MAX_TOTAL_CONTEXT_SIZE_BYTES // 1024
+                        # max_ctx_size_kb = ContextManager.MAX_TOTAL_CONTEXT_SIZE_BYTES // 1024 # Not used in new hint
                         num_ctx_files = len(self.context_manager.context_files)
                         max_num_files = ContextManager.MAX_CONTEXT_FILES
-                        current_info_line_content = f"Ctx Files: {num_ctx_files}/{max_num_files}, Size: {ctx_size_kb}KB/{max_ctx_size_kb}KB. ('a' to analyze)"
-                    
+                        # current_info_line_content = f"Ctx Files: {num_ctx_files}/{max_num_files}, Size: {ctx_size_kb}KB/{max_ctx_size_kb}KB. ('a' to analyze)"
+                        current_info_line_content = f"Ctx: {num_ctx_files}/{max_num_files} {ctx_size_kb}KB. [/] Search [Ctrl+R] Re-index"
+                        if self.search_init_error:
+                            current_info_line_content = f"Search unavailable: {self.search_init_error}"
+
+
                     self.stdscr.addstr(info_line_y, 1, " " * (w - 2)) # Clear previous
-                    self.stdscr.addstr(info_line_y, 1, current_info_line_content[:w-2], self.highlight_attr if self.context_status_message else self.normal_attr)
+                    self.stdscr.addstr(info_line_y, 1, current_info_line_content[:w-2],
+                                       self.highlight_attr if self.context_status_message or self.search_init_error else self.normal_attr)
                     if self.context_status_message == current_info_line_content: # Ensure we only clear if it was the message displayed
                         self.context_status_message = "" # Clear after display
 
@@ -375,6 +416,9 @@ class TerminalUI:
                             break # No more lines to draw
                 
                 analysis_hint_text = "[b] Back to Tree, [t] Gen Tests"
+                if self.analysis_selectable_items: # Only add if there are items to refactor
+                    analysis_hint_text += ", [r] Refactor"
+
                 # Display loading message for test generation if active
                 if self.is_generating_tests: # This will be very brief due to synchronous call
                     loading_msg = "Generating tests, please wait..."
@@ -386,6 +430,46 @@ class TerminalUI:
 
                 if content_y_start + analyzer_view_height < h -1:
                     self.stdscr.addstr(content_y_start + analyzer_view_height, 2, analysis_hint_text[:w-2], self.highlight_attr)
+
+            elif self.file_tab_mode == "refactor_selection":
+                title = f"Select Refactoring for {self.refactor_code_item_details['name']}:"
+                self.stdscr.addstr(content_y_start, 1, title[:w-2], self.highlight_attr)
+
+                list_y_start = content_y_start + 2
+                for i, ref_op in enumerate(self.available_refactorings):
+                    attr = self.highlight_attr if i == self.selected_refactoring_index else self.normal_attr
+                    if list_y_start + i < h - 2: # Ensure space for hints
+                        self.stdscr.addstr(list_y_start + i, 2, ref_op[:w-3], attr)
+
+                hints = "[Enter] Confirm, [b] Back"
+                self.stdscr.addstr(h - 2, 2, hints[:w-3], self.highlight_attr)
+
+            elif self.file_tab_mode == "refactor_diff_view":
+                if self.is_requesting_refactor:
+                    loading_msg = "Requesting refactor from LLM..."
+                    self.stdscr.addstr(content_y_start + (h - content_y_start -1) // 2,
+                                       max(1, (w - len(loading_msg))//2),
+                                       loading_msg, self.highlight_attr)
+                else:
+                    title = "Refactoring Diff:"
+                    self.stdscr.addstr(content_y_start, 1, title[:w-2], self.highlight_attr)
+
+                    diff_view_height = h - content_y_start - 3 # Title, hints
+                    # Basic scrolling for diff lines (not implemented yet, show top part)
+                    for i, line in enumerate(self.refactor_diff_lines):
+                        if i >= diff_view_height: break
+                        # Simple coloring for diff lines
+                        line_attr = self.normal_attr
+                        if line.startswith('+'): line_attr = curses.color_pair(3) # Green for additions
+                        elif line.startswith('-'): line_attr = curses.A_BOLD # Red-like (depends on term, bold for now)
+                        elif line.startswith('@@'): line_attr = curses.color_pair(2) # Cyan for header
+
+                        if content_y_start + 1 + i < h -2:
+                             self.stdscr.addstr(content_y_start + 1 + i, 1, line.rstrip()[:w-2], line_attr)
+
+                    hints = "[a] Apply, [c] Cancel/Back"
+                    self.stdscr.addstr(h - 2, 2, hints[:w-3], self.highlight_attr)
+
 
             elif self.file_tab_mode == "test_viewer":
                 test_viewer_height = h - content_y_start - 2 # Reserve 1 line for back hint
@@ -412,6 +496,54 @@ class TerminalUI:
                 test_viewer_hint = "[b] Back to Analyzer"
                 if content_y_start + test_viewer_height < h -1:
                     self.stdscr.addstr(content_y_start + test_viewer_height, 2, test_viewer_hint[:w-2], self.highlight_attr)
+
+            elif self.file_tab_mode == "search_input":
+                self._clear_content_area(content_y_start, h, w) # Ensure clean slate
+                prompt_text = f"Search Query ([Enter] Search, [Esc] Cancel): > {self.search_query_input_buffer}"
+                self.stdscr.addstr(content_y_start, 1, prompt_text[:w-2])
+
+            elif self.file_tab_mode == "search_results":
+                self._clear_content_area(content_y_start, h, w)
+                title = f"Search Results for '{self.original_search_query}' ({self.search_status_message})"
+                self.stdscr.addstr(content_y_start, 1, title[:w-2], self.highlight_attr)
+
+                results_display_height = h - content_y_start - 3 # 1 for title, 1 for hints, 1 for bottom margin
+
+                # Scrolling logic for search results
+                if self.selected_search_result_index >= self.search_results_top_line + results_display_height:
+                    self.search_results_top_line = self.selected_search_result_index - results_display_height + 1
+                if self.selected_search_result_index < self.search_results_top_line:
+                    self.search_results_top_line = self.selected_search_result_index
+
+                # Clamp top_line
+                self.search_results_top_line = max(0, self.search_results_top_line)
+                if len(self.search_results_list) > results_display_height:
+                     self.search_results_top_line = min(self.search_results_top_line, len(self.search_results_list) - results_display_height)
+                else: # Not enough items to scroll
+                    self.search_results_top_line = 0
+
+
+                current_y = content_y_start + 2 # Start drawing results below the title
+                for i in range(results_display_height // 2): # Each result takes ~2 lines, so iterate half the height
+                    idx_to_display = self.search_results_top_line + i
+                    if idx_to_display < len(self.search_results_list):
+                        if current_y + 1 >= h - 2: break # Check if space for this item (2 lines) and hints
+
+                        item = self.search_results_list[idx_to_display]
+                        attr = self.highlight_attr if idx_to_display == self.selected_search_result_index else self.normal_attr
+
+                        display_line = f"{item['file_path']} (L{item['start_line']}-{item['end_line']}) Score: {item['score']:.2f}"
+                        self.stdscr.addstr(current_y, 2, display_line[:w-3], attr)
+
+                        text_preview = item['text'].replace('\n', ' ').strip()
+                        self.stdscr.addstr(current_y + 1, 4, text_preview[:w-5], attr)
+                        current_y += 2
+                    else:
+                        break
+
+                hints = "[Enter] Open, [Esc] Back to Query, [s] New Search"
+                if content_y_start + results_display_height +1 < h -1 : # Ensure hints line is on screen
+                    self.stdscr.addstr(content_y_start + results_display_height + 1, 1, hints[:w-2])
 
 
         elif current_active_tab == "Commands":
@@ -788,7 +920,36 @@ class TerminalUI:
                             self.file_tab_mode = "viewer"
                             self.active_file_viewer = viewer.FileViewer(os.path.join(self.project_root, item_path_rel))
                      return True
-                # elif self.tab_manager.handle_input(key): return True # Tab switching - Handled by global below
+                elif key == ord('/'):
+                    if self.search_init_error:
+                        self.context_status_message = f"Search not available: {self.search_init_error}"
+                        return True
+                    self.search_query_input_buffer = ""
+                    self.original_search_query = "" # Clear previous query that led to results
+                    self.search_results_list = []   # Clear previous results
+                    self.file_tab_mode = "search_input"
+                    self.context_status_message = "Enter search query."
+                    return True
+                elif key == 18: # CTRL_R for Re-index
+                    if self.search_init_error:
+                        self.context_status_message = f"Search Indexer not ready: {self.search_init_error}"
+                        return True
+
+                    self.context_status_message = "Building search index... (this may take a moment)"
+                    self.stdscr.refresh() # Show message immediately
+
+                    project_filepaths = [item[0] for item in self.project_items if item[1] == 'file']
+                    # This is a blocking call. Consider threading for long operations in a real app.
+                    self.search_indexer.build_index(project_filepaths)
+
+                    # Attempt to load the newly built index
+                    load_success = self.search_indexer.load_index()
+                    if load_success:
+                         self.context_status_message = "Search index rebuilt and loaded."
+                    else:
+                         self.context_status_message = "Search index rebuilt, but failed to load. Check logs."
+                    return True
+
 
             elif self.file_tab_mode == "viewer" and self.active_file_viewer:
                 if key == ord('b'):
@@ -893,7 +1054,260 @@ class TerminalUI:
                     else:
                         self.context_status_message = "No item selected or analysis items not available."
                     return True
-                # elif key == ord('c'): # TODO: Add analysis to context manager?
+                elif key == ord('r'): # Refactor
+                    if self.analysis_selectable_items and \
+                       0 <= self.selected_analysis_item_index < len(self.analysis_selectable_items):
+                        selected_item_details = self.analysis_selectable_items[self.selected_analysis_item_index]
+                        item_path_rel = self.active_analysis_report['filepath'] # Assuming this is always set
+                        element_name = selected_item_details['name']
+                        element_type = selected_item_details['type']
+
+                        code_details = self.code_analyzer.get_code_element_source(item_path_rel, element_name, element_type)
+
+                        if not code_details.get("error"):
+                            self.refactor_code_item_details = {
+                                'filepath': item_path_rel,
+                                'name': element_name,
+                                'type': element_type,
+                                **code_details # includes source_code, start_line, end_line
+                            }
+                            self.original_code_snippet = code_details['source_code']
+                            self.selected_refactoring_index = 0
+                            self.file_tab_mode = "refactor_selection"
+                            self.context_status_message = f"Select refactoring for {element_name}."
+                        else:
+                            self.context_status_message = code_details.get("error", "Failed to get source code for element.")
+                    else:
+                        self.context_status_message = "No analyzable item selected for refactoring."
+                    return True
+
+
+            elif self.file_tab_mode == "refactor_selection":
+                if key == curses.KEY_UP:
+                    if self.selected_refactoring_index > 0:
+                        self.selected_refactoring_index -= 1
+                    return True
+                elif key == curses.KEY_DOWN:
+                    if self.selected_refactoring_index < len(self.available_refactorings) - 1:
+                        self.selected_refactoring_index += 1
+                    return True
+                elif key == ord('b') or key == curses.KEY_ESCAPE:
+                    self.file_tab_mode = "analyzer" # Go back to analyzer view
+                    self.context_status_message = "Refactoring selection cancelled."
+                    # self.refactor_code_item_details = None # Optionally clear, or keep for quick re-entry
+                    return True
+                elif key == curses.KEY_ENTER or key == 10 or key == 13:
+                    selected_op = self.available_refactorings[self.selected_refactoring_index]
+                    self.is_requesting_refactor = True
+                    selected_op = self.available_refactorings[self.selected_refactoring_index]
+                    self.is_requesting_refactor = True
+                    # self.file_tab_mode = "refactor_diff_view" # Already set by this point, or will be set after LLM call
+
+                    # Redraw screen to show "Requesting..."
+                    self.stdscr.erase()
+                    self._draw_title()
+                    self._draw_tabs()
+                    self._draw_main_content() # This should now show the loading message due to is_requesting_refactor=True
+                    self.stdscr.refresh()
+
+                    self.refactored_code_suggestion = self.chat_manager.request_refactor(
+                        self.original_code_snippet, selected_op
+                    )
+                    self.is_requesting_refactor = False
+
+                    if not self.refactored_code_suggestion or self.refactored_code_suggestion.startswith("# Error:"):
+                        self.context_status_message = self.refactored_code_suggestion or "LLM request failed: Empty response."
+                        self.file_tab_mode = "refactor_selection" # Stay on selection screen
+                        self.refactor_diff_lines = []
+                    else:
+                        self.refactor_diff_lines = list(difflib.unified_diff(
+                            self.original_code_snippet.splitlines(keepends=True),
+                            self.refactored_code_suggestion.splitlines(keepends=True),
+                            fromfile='original',
+                            tofile='refactored',
+                            lineterm=''
+                        ))
+                        self.context_status_message = "LLM suggestion received. Review diff."
+                        self.file_tab_mode = "refactor_diff_view" # Ensure this is set for next draw
+                    return True
+
+            elif self.file_tab_mode == "refactor_diff_view":
+                if key == ord('c') or key == ord('b') or key == curses.KEY_ESCAPE:
+                    self.file_tab_mode = "refactor_selection" # Back to selection
+                    self.refactor_diff_lines = []
+                    # self.original_code_snippet = "" # Cleared when new selection is made or if fully backing out
+                    # self.refactored_code_suggestion = ""
+                    self.context_status_message = "Refactoring cancelled. Select an option." # Minor refinement
+                    return True
+                elif key == ord('a'): # Apply
+                    if self.refactor_code_item_details and self.refactored_code_suggestion:
+                        filepath_rel = self.refactor_code_item_details['filepath']
+                        start_line = self.refactor_code_item_details['start_line'] # 1-indexed
+                        end_line = self.refactor_code_item_details['end_line']     # 1-indexed
+                        abs_filepath = os.path.join(self.project_root, filepath_rel)
+
+                        try:
+                            with open(abs_filepath, 'r', encoding='utf-8') as f:
+                                file_lines = f.readlines() # Keeps newlines
+
+                            new_code_lines = self.refactored_code_suggestion.splitlines(keepends=True)
+                            # Ensure last line of snippet has a newline if snippet is not empty,
+                            # to match readlines() behavior and typical code formatting.
+                            if new_code_lines and not self.refactored_code_suggestion.endswith('\n'):
+                                new_code_lines[-1] += '\n'
+
+                            # Make sure new_code_lines has at least one line if suggestion is not empty, even if it's just a newline
+                            if not new_code_lines and self.refactored_code_suggestion: # e.g. suggestion was " "
+                                new_code_lines = ['\n'] # Default to a newline to avoid issues if it was meant to be empty. Or handle as error?
+                            elif not new_code_lines and not self.refactored_code_suggestion: # Suggestion is truly empty string
+                                 pass # new_code_lines remains empty, effectively deleting the segment if start_line <= end_line
+
+
+                            prefix = file_lines[:start_line - 1]
+                            suffix = file_lines[end_line:] # Slicing handles if end_line is beyond current length
+
+                            new_content_lines = prefix + new_code_lines + suffix
+
+                            with open(abs_filepath, 'w', encoding='utf-8') as f:
+                                f.writelines(new_content_lines)
+
+                            self.context_status_message = f"Refactoring applied to {os.path.basename(filepath_rel)}."
+                            self.active_analysis_report = None # Clear to encourage re-analysis
+                            self.analysis_display_lines = []
+                        except Exception as e:
+                            self.context_status_message = f"Error applying changes: {str(e)}"
+                        finally:
+                            self.file_tab_mode = "analyzer"
+                            self.refactor_code_item_details = None
+                            self.original_code_snippet = ""
+                            self.refactored_code_suggestion = ""
+                            self.refactor_diff_lines = []
+                            self.selected_refactoring_index = 0
+                    else:
+                        self.context_status_message = "Error: Missing details to apply refactoring."
+                        self.file_tab_mode = "analyzer" # Go back to analyzer anyway
+                        # Clear state just in case
+                        self.refactor_code_item_details = None
+                        self.original_code_snippet = ""
+                        self.refactored_code_suggestion = ""
+                        self.refactor_diff_lines = []
+                        self.selected_refactoring_index = 0
+                    return True
+
+            elif self.file_tab_mode == "search_input":
+                if key == curses.KEY_ESCAPE:
+                    self.file_tab_mode = "tree"
+                    self.context_status_message = "Search cancelled."
+                    self.search_query_input_buffer = "" # Clear buffer
+                    return True
+                elif key == curses.KEY_BACKSPACE or key == 127:
+                    self.search_query_input_buffer = self.search_query_input_buffer[:-1]
+                    return True
+                elif 32 <= key <= 126: # Printable characters
+                    self.search_query_input_buffer += chr(key)
+                    return True
+                elif key == curses.KEY_ENTER or key == 10 or key == 13:
+                    query = self.search_query_input_buffer.strip()
+                    self.original_search_query = query # Store the query that will be used
+
+                    if not query:
+                        self.search_status_message = "Query is empty"
+                        self.search_results_list = []
+                        self.file_tab_mode = "search_results"
+                        return True
+
+                    self.search_status_message = "Searching..."
+                    self.file_tab_mode = "search_results" # Switch to show "Searching..."
+                    self.stdscr.refresh() # Show "Searching..." status immediately
+
+                    search_response = self.search_indexer.search(query, top_n=20) # Get more results internally
+
+                    if search_response.get("error"):
+                        self.search_status_message = search_response["error"]
+                        self.search_results_list = []
+                    else:
+                        self.search_results_list = search_response["results"]
+                        self.search_status_message = f"{len(self.search_results_list)} results." if self.search_results_list else "No results found."
+
+                    self.selected_search_result_index = 0
+                    self.search_results_top_line = 0
+                    # file_tab_mode is already search_results
+                    return True
+
+            elif self.file_tab_mode == "search_results":
+                results_display_area_height = max_h - 4 - 3 # From drawing logic (h - content_start - title - hints - margin)
+                                                            # Each item takes 2 lines
+                items_per_page = results_display_area_height // 2
+
+
+                if key == curses.KEY_UP:
+                    if self.selected_search_result_index > 0:
+                        self.selected_search_result_index -= 1
+                        if self.selected_search_result_index < self.search_results_top_line:
+                            self.search_results_top_line = self.selected_search_result_index
+                    return True
+                elif key == curses.KEY_DOWN:
+                    if self.selected_search_result_index < len(self.search_results_list) - 1:
+                        self.selected_search_result_index += 1
+                        # If selection goes off screen, adjust top line
+                        # Assuming each result item takes 2 lines for display
+                        if self.selected_search_result_index >= self.search_results_top_line + items_per_page:
+                            self.search_results_top_line = self.selected_search_result_index - items_per_page + 1
+                    return True
+                elif key == curses.KEY_PPAGE:
+                    self.selected_search_result_index = max(0, self.selected_search_result_index - items_per_page)
+                    self.search_results_top_line = max(0, self.search_results_top_line - items_per_page)
+                    if self.selected_search_result_index < self.search_results_top_line : # Ensure selection is visible
+                         self.search_results_top_line = self.selected_search_result_index
+                    return True
+                elif key == curses.KEY_NPAGE:
+                    self.selected_search_result_index = min(len(self.search_results_list) - 1, self.selected_search_result_index + items_per_page)
+                    if len(self.search_results_list) > items_per_page:
+                        self.search_results_top_line = min(len(self.search_results_list) - items_per_page, self.search_results_top_line + items_per_page)
+                    if self.selected_search_result_index >= self.search_results_top_line + items_per_page: # Ensure selection is visible
+                        self.search_results_top_line = self.selected_search_result_index - items_per_page + 1
+                    if self.search_results_top_line < 0: self.search_results_top_line = 0
+
+                    return True
+                elif key == curses.KEY_ESCAPE:
+                    self.file_tab_mode = "search_input" # Go back to query input
+                    self.search_status_message = ""
+                    self.context_status_message = "Enter new query or modify."
+                    return True
+                elif key == ord('s'): # New search
+                    self.file_tab_mode = "search_input"
+                    self.search_query_input_buffer = "" # Clear buffer for new search
+                    self.search_status_message = ""
+                    self.context_status_message = "Enter new search query."
+                    return True
+                elif key == curses.KEY_ENTER or key == 10 or key == 13:
+                    if self.search_results_list and 0 <= self.selected_search_result_index < len(self.search_results_list):
+                        selected_item = self.search_results_list[self.selected_search_result_index]
+                        filepath_rel = selected_item['file_path']
+                        line_to_scroll_to = selected_item['start_line']
+                        abs_path = os.path.join(self.project_root, filepath_rel)
+
+                        if os.path.isfile(abs_path):
+                            if self.active_file_viewer: self.active_file_viewer.close()
+                            self.active_file_viewer = viewer.FileViewer(abs_path)
+                            # We need to pass display_height to scroll_to_line, or set it on viewer
+                            # For now, let's try to make scroll_to_line in viewer more robust or simpler
+                            # Assuming FileViewer's scroll_to_line can work without explicit display_height
+                            # by just setting top_line_idx intelligently.
+                            # viewer_display_height needs to be available here.
+                            # It's h - content_y_start - 2 (from _draw_main_content viewer mode)
+                            h, w = self.stdscr.getmaxyx() # Get dimensions
+                            content_y_start = 4 # Matching _draw_main_content
+                            viewer_display_height_for_scroll = h - content_y_start - 2
+
+                            self.active_file_viewer.scroll_to_line(line_to_scroll_to, viewer_display_height_for_scroll)
+                            self.file_tab_mode = "viewer"
+                            self.context_status_message = f"Opened {filepath_rel} at line {line_to_scroll_to}."
+                        else:
+                            self.search_status_message = f"Error: File {filepath_rel} not found."
+                            self.context_status_message = self.search_status_message # Also show in main context status
+                    return True
+
 
             elif self.file_tab_mode == "test_viewer":
                 test_viewer_content_height = max_h - 4 - 2 # h - content_start_y - hint_lines
