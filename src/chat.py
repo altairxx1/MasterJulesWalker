@@ -1,4 +1,5 @@
 import re # Added for @include directive parsing
+import json # For parsing LLM response for command suggestions
 from .llm import OpenRouterClient
 from .prompts import format_chat_messages, DEFAULT_SYSTEM_PROMPT
 from .config import load_config # To get API key and model for the client
@@ -182,6 +183,141 @@ class ChatManager:
     def clear_history(self):
         self.chat_history = []
 
+    def request_test_generation(self, item_name, item_type, item_code_snippet=None, framework="pytest"):
+        if self.initialization_error:
+            return f"# Error: LLM Client not initialized. {self.initialization_error}"
+        if not self.llm_client:
+            return "# Error: LLM client not available for test generation."
+        if not item_name or not item_type:
+            return "# Error: Item name or type not provided for test generation."
+
+        prompt = f"Generate comprehensive {framework} unit tests for the following Python {item_type}:\n\nName: `{item_name}`\n\n"
+        if item_code_snippet:
+            prompt += f"Source Code Snippet:\n```python\n{item_code_snippet}\n```\n\n"
+        else:
+            prompt += "The source code is not available, please generate tests based on the name and type. Assume standard library imports if necessary, or placeholder imports for custom modules.\n\n"
+
+        prompt += f"Ensure the tests are well-structured, cover typical use cases, edge cases, and follow best practices for {framework}."
+        prompt += f" The output should be only the Python code for the tests, ready to be saved to a .py file."
+
+        # Using a simplified messages structure, similar to send_message but without history or @include.
+        # The system prompt from self.system_prompt will still be used by format_chat_messages.
+        # No chat history is included for test generation requests to keep them isolated.
+        messages_payload = format_chat_messages(
+            user_prompt=prompt,
+            system_prompt=self.system_prompt, # Or a specific one for test generation
+            history=[],
+            context_string=None # No file context for this specific request type yet
+        )
+
+        try:
+            # Using slightly different parameters for code generation
+            # Might want to make these configurable too in the future
+            generated_code = self.llm_client.send_chat_request(
+                messages=messages_payload,
+                max_tokens=1500,  # Increased max_tokens for potentially longer test files
+                temperature=0.4   # Slightly lower temperature for more deterministic code
+            )
+
+            if generated_code:
+                # Optional: Basic validation or cleaning of the response can be done here.
+                # For example, ensuring it starts with "import" or "def" or "#".
+                return generated_code
+            else:
+                return f"# Error: Received no response or empty response from LLM for {item_name}."
+
+        except Exception as e:
+            return f"# Error generating tests for {item_name}: {str(e)}"
+
+    def request_command_suggestions(self, context_signals):
+        if self.initialization_error:
+            # Log or handle this state appropriately if needed beyond returning empty
+            # print(f"Cmd Suggestion Error: LLM Client not initialized. {self.initialization_error}")
+            return []
+        if not self.llm_client:
+            # print("Cmd Suggestion Error: LLM client not available.")
+            return []
+
+        available_commands = context_signals.get("available_commands", [])
+        if not available_commands:
+            return [] # No commands to suggest from
+
+        # Format available commands for the prompt
+        formatted_commands_list = []
+        for i, (name, desc) in enumerate(available_commands):
+            formatted_commands_list.append(f"{i+1}. name: '{name}', description: '{desc}'")
+        available_commands_text = "\n".join(formatted_commands_list)
+
+        # Construct the system prompt
+        system_prompt_for_suggestions = (
+            "You are an intelligent assistant that suggests relevant commands based on the user's current context. "
+            "The user is working in a terminal application. Given the following context and a list of available commands, "
+            "please identify and return a JSON list of command *names* (strings) from the *provided available commands list* "
+            "that would be most helpful to the user. Only return command names that are explicitly in the list. "
+            "If no commands are particularly relevant, return an empty list. Ensure the output is only the JSON list."
+        )
+
+        # Construct the user prompt using other context signals
+        user_prompt_parts = ["User Context:"]
+        if context_signals.get("current_tab"):
+            user_prompt_parts.append(f"- Current Tab: {context_signals['current_tab']}")
+        if context_signals.get("context_files"):
+            context_files_summary = ", ".join(context_signals['context_files']) if context_signals['context_files'] else "None"
+            user_prompt_parts.append(f"- Files in Context: {context_files_summary}")
+        if context_signals.get("recent_chat_history"):
+            chat_summary = "\n  ".join(context_signals['recent_chat_history']) if context_signals['recent_chat_history'] else "None"
+            user_prompt_parts.append(f"- Recent Chat:\n  {chat_summary}")
+        if context_signals.get("active_analysis") and context_signals['active_analysis'] != "None":
+            user_prompt_parts.append(f"- Active Code Analysis: {context_signals['active_analysis']}")
+
+        user_prompt_parts.append("\nAvailable Commands:")
+        user_prompt_parts.append(available_commands_text)
+        user_prompt_parts.append("\nBased on the user context and the available commands listed above, which commands are most relevant? Return a JSON list of their names.")
+
+        user_prompt = "\n".join(user_prompt_parts)
+
+        messages_payload = format_chat_messages(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt_for_suggestions,
+            history=[],
+            context_string=None
+        )
+
+        try:
+            response_text = self.llm_client.send_chat_request(
+                messages=messages_payload,
+                max_tokens=200, # Adjusted for potentially short JSON list
+                temperature=0.2  # Lower temperature for more deterministic output
+            )
+
+            if response_text:
+                # LLM might return markdown ```json ... ``` or just the list.
+                if response_text.strip().startswith("```json"):
+                    response_text = response_text.strip()[7:-3].strip() # Remove markdown
+                elif response_text.strip().startswith("```"): # Fallback for just ```
+                     response_text = response_text.strip()[3:-3].strip()
+
+
+                suggested_names = json.loads(response_text)
+                if not isinstance(suggested_names, list):
+                    # print(f"Cmd Suggestion Error: LLM response is not a list: {suggested_names}")
+                    return []
+
+                # Validate names
+                valid_command_names = [cmd[0] for cmd in available_commands]
+                validated_suggestions = [name for name in suggested_names if isinstance(name, str) and name in valid_command_names]
+
+                return validated_suggestions
+            else:
+                # print("Cmd Suggestion Error: Received no response from LLM.")
+                return []
+
+        except json.JSONDecodeError as e:
+            # print(f"Cmd Suggestion JSON Decode Error: {e}. Response was: {response_text[:100]}") # Log snippet
+            return []
+        except Exception as e:
+            # print(f"Cmd Suggestion LLM Error: {e}")
+            return []
 
 if __name__ == "__main__":
     print("Testing ChatManager...")

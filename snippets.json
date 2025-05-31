@@ -1,0 +1,26 @@
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "name": "Boilerplate Pytest",
+    "content": "import pytest\n\ndef test_example():\n    assert True",
+    "language": "python",
+    "category": "Testing",
+    "tags": ["pytest", "boilerplate", "python"]
+  },
+  {
+    "id": "b2c3d4e5-f6g7-8901-2345-678901bcdef0",
+    "name": "Simple Bash Loop",
+    "content": "for i in {1..5}; do\n  echo \"Welcome $i times\"\ndone",
+    "language": "bash",
+    "category": "Scripting",
+    "tags": ["bash", "loop", "shell"]
+  },
+  {
+    "id": "c3d4e5f6-g7h8-9012-3456-789012cdef01",
+    "name": "JavaScript Console Log",
+    "content": "console.log('Hello from JavaScript!');",
+    "language": "javascript",
+    "category": "Web",
+    "tags": ["javascript", "frontend", "debug"]
+  }
+]

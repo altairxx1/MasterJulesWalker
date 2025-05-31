@@ -465,6 +465,216 @@ class TestChatManager(unittest.TestCase):
 
         self.ui_reference_mock.add_file_to_context = original_add_file_method # Restore
 
+    # --- Tests for request_test_generation ---
+
+    def test_request_test_generation_success(self):
+        item_name = "my_cool_function"
+        item_type = "function"
+        framework = "pytest"
+        expected_generated_tests = f"# Tests for {item_name}\nimport pytest\ndef test_{item_name}():\n    assert True"
+
+        self.mock_llm_client_instance.send_chat_request.return_value = expected_generated_tests
+
+        # We want the actual format_chat_messages to run to check the prompt.
+        # So, we don't mock it here, or ensure the setUp mock is very generic if it affects this.
+        # The setUp mock_format_chat_messages is:
+        # lambda user_prompt, system_prompt, history, context_string: [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        # This is fine as request_test_generation constructs a user_prompt and passes it.
+
+        response = self.chat_manager.request_test_generation(item_name, item_type, framework=framework)
+
+        self.assertEqual(response, expected_generated_tests)
+
+        self.mock_llm_client_instance.send_chat_request.assert_called_once()
+        args, kwargs = self.mock_llm_client_instance.send_chat_request.call_args
+
+        self.assertIn("messages", kwargs)
+        messages_payload = kwargs["messages"]
+
+        # Check the user prompt part of the payload (assuming format_chat_messages structure from setUp)
+        user_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "user"), None)
+        self.assertIsNotNone(user_prompt_payload)
+
+        self.assertIn(f"Generate comprehensive {framework} unit tests", user_prompt_payload["content"])
+        self.assertIn(f"Python {item_type}", user_prompt_payload["content"])
+        self.assertIn(f"Name: `{item_name}`", user_prompt_payload["content"])
+        self.assertIn("source code is not available", user_prompt_payload["content"]) # Since item_code_snippet is None
+        self.assertIn(f"best practices for {framework}", user_prompt_payload["content"])
+        self.assertIn("only the Python code for the tests", user_prompt_payload["content"])
+
+        self.assertEqual(kwargs.get("max_tokens"), 1500)
+        self.assertEqual(kwargs.get("temperature"), 0.4)
+
+    def test_request_test_generation_with_snippet(self):
+        item_name = "MyClass"
+        item_type = "class"
+        framework = "unittest"
+        snippet = "class MyClass:\n  pass"
+        expected_generated_tests = f"# Tests for {item_name}\nclass TestMyClass(unittest.TestCase):\n    pass"
+
+        self.mock_llm_client_instance.send_chat_request.return_value = expected_generated_tests
+
+        response = self.chat_manager.request_test_generation(item_name, item_type, item_code_snippet=snippet, framework=framework)
+        self.assertEqual(response, expected_generated_tests)
+
+        self.mock_llm_client_instance.send_chat_request.assert_called_once()
+        args, kwargs = self.mock_llm_client_instance.send_chat_request.call_args
+        messages_payload = kwargs["messages"]
+        user_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "user"), None)
+        self.assertIsNotNone(user_prompt_payload)
+
+        self.assertIn(f"Source Code Snippet:\n```python\n{snippet}\n```", user_prompt_payload["content"])
+
+    def test_request_test_generation_llm_exception(self):
+        item_name = "bad_function"
+        item_type = "function"
+        error_message = "LLM API is down"
+        self.mock_llm_client_instance.send_chat_request.side_effect = Exception(error_message)
+
+        response = self.chat_manager.request_test_generation(item_name, item_type)
+
+        expected_error_response = f"# Error generating tests for {item_name}: {error_message}"
+        self.assertEqual(response, expected_error_response)
+
+    def test_request_test_generation_missing_params(self):
+        response = self.chat_manager.request_test_generation(item_name=None, item_type="function")
+        self.assertEqual(response, "# Error: Item name or type not provided for test generation.")
+
+        response = self.chat_manager.request_test_generation(item_name="some_func", item_type=None)
+        self.assertEqual(response, "# Error: Item name or type not provided for test generation.")
+
+    def test_request_test_generation_no_llm_client(self):
+        # Simulate LLM client not being initialized
+        original_client = self.chat_manager.llm_client
+        original_init_error = self.chat_manager.initialization_error
+
+        self.chat_manager.llm_client = None
+        self.chat_manager.initialization_error = "Test init error"
+
+        response = self.chat_manager.request_test_generation("any_func", "function")
+        self.assertEqual(response, f"# Error: LLM Client not initialized. {self.chat_manager.initialization_error}")
+
+        # Restore
+        self.chat_manager.llm_client = original_client
+        self.chat_manager.initialization_error = original_init_error
+
+    # --- Tests for request_command_suggestions ---
+
+    @patch('src.chat.json.loads') # To inspect what's passed to json.loads if needed
+    def test_request_command_suggestions_success(self, mock_json_loads):
+        context_signals = {
+            "current_tab": "Files",
+            "context_files": ["file1.py (10KB)"],
+            "recent_chat_history": ["User: Hello"],
+            "active_analysis": "Analysis of file1.py",
+            "available_commands": [("cmd1", "desc1"), ("cmd2", "desc2"), ("cmd3", "desc3")]
+        }
+        expected_suggestions = ["cmd1", "cmd2"]
+        # Mock what json.loads will return after successful LLM call & markdown stripping
+        mock_json_loads.return_value = expected_suggestions
+
+        # Mock the raw LLM response that json.loads will process
+        # This raw response needs to be a string that when passed to json.loads (after markdown stripping)
+        # results in mock_json_loads.return_value.
+        # The actual content of this string doesn't matter as much as json.loads is mocked.
+        # However, if we weren't mocking json.loads, this would be important.
+        # For this test, we'll assume the LLM returns a string that becomes expected_suggestions.
+        self.mock_llm_client_instance.send_chat_request.return_value = '["cmd1", "cmd2"]'
+
+
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, expected_suggestions)
+
+        self.mock_llm_client_instance.send_chat_request.assert_called_once()
+        args, kwargs = self.mock_llm_client_instance.send_chat_request.call_args
+        self.assertIn("messages", kwargs)
+        messages_payload = kwargs["messages"]
+
+        system_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "system"), None)
+        user_prompt_payload = next((msg for msg in messages_payload if msg["role"] == "user"), None)
+        self.assertIsNotNone(system_prompt_payload)
+        self.assertIn("You are an intelligent assistant that suggests relevant commands", system_prompt_payload["content"])
+
+        self.assertIsNotNone(user_prompt_payload)
+        self.assertIn("User Context:", user_prompt_payload["content"])
+        self.assertIn("- Current Tab: Files", user_prompt_payload["content"])
+        self.assertIn("Available Commands:", user_prompt_payload["content"])
+        self.assertIn("1. name: 'cmd1', description: 'desc1'", user_prompt_payload["content"])
+        self.assertIn("Return a JSON list of their names.", user_prompt_payload["content"])
+
+        self.assertEqual(kwargs.get("max_tokens"), 200)
+        self.assertEqual(kwargs.get("temperature"), 0.2)
+
+        # Ensure json.loads was called with the (potentially stripped) response from LLM
+        # This mock_llm_client_instance.send_chat_request.return_value is what json.loads should get
+        mock_json_loads.assert_called_once_with('["cmd1", "cmd2"]')
+
+
+    def test_request_command_suggestions_handles_markdown_json(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        # No need to mock json.loads here, testing the stripping logic
+        self.mock_llm_client_instance.send_chat_request.return_value = '```json\n["cmd1"]\n```'
+
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, ["cmd1"])
+
+    def test_request_command_suggestions_malformed_json(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        self.mock_llm_client_instance.send_chat_request.return_value = '{"cmd1": "cmd2"' # Malformed
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+
+    def test_request_command_suggestions_non_list_json(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        self.mock_llm_client_instance.send_chat_request.return_value = '{"command": "cmd1"}' # Valid JSON, but not a list
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+
+    def test_request_command_suggestions_llm_exception(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        self.mock_llm_client_instance.send_chat_request.side_effect = Exception("LLM is sleeping")
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+
+    def test_request_command_suggestions_filters_invalid_names(self):
+        context_signals = {
+            "available_commands": [("cmd1", "desc1"), ("cmd2", "desc2")]
+        }
+        # LLM suggests "cmd3" which is not in available_commands
+        self.mock_llm_client_instance.send_chat_request.return_value = '["cmd1", "cmd3"]'
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, ["cmd1"])
+
+    def test_request_command_suggestions_no_llm_client(self):
+        original_client = self.chat_manager.llm_client
+        original_init_error = self.chat_manager.initialization_error
+        self.chat_manager.llm_client = None
+        self.chat_manager.initialization_error = "LLM client test error"
+
+        response = self.chat_manager.request_command_suggestions({})
+        self.assertEqual(response, [])
+
+        self.chat_manager.llm_client = original_client
+        self.chat_manager.initialization_error = original_init_error
+
+    def test_request_command_suggestions_no_available_commands(self):
+        context_signals = {"available_commands": []}
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+        self.mock_llm_client_instance.send_chat_request.assert_not_called()
+
+    def test_request_command_suggestions_empty_llm_response(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        self.mock_llm_client_instance.send_chat_request.return_value = "" # Empty string
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+
+    def test_request_command_suggestions_llm_returns_empty_list(self):
+        context_signals = {"available_commands": [("cmd1", "desc1")]}
+        self.mock_llm_client_instance.send_chat_request.return_value = "[]" # Empty list as JSON
+        response = self.chat_manager.request_command_suggestions(context_signals)
+        self.assertEqual(response, [])
+
 
 if __name__ == '__main__':
     unittest.main()
