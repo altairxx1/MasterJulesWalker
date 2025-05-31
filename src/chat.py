@@ -6,7 +6,24 @@ from .config import load_config # To get API key and model for the client
 # No direct import of ui needed here, just passing the reference
 
 class ChatManager:
-    def __init__(self, config=None, ui_reference=None): # Added ui_reference
+    """
+    Manages chat interactions with an LLM, including history, context,
+    and specialized LLM requests like test generation and command suggestions.
+    It interfaces with an LLM client (e.g., OpenRouterClient) and can
+    interact with a UI component to exchange context information.
+    """
+    def __init__(self, config=None, ui_reference=None):
+        """
+        Initializes the ChatManager.
+
+        Args:
+            config (dict, optional): Configuration dictionary. If None, loads from default.
+                                     Expected keys: "openrouter_api_key", "mjw_model",
+                                     "max_tokens", "temperature".
+            ui_reference (object, optional): A reference to the UI instance, used for
+                                             accessing UI-specific context methods like
+                                             `add_file_to_context` and `get_current_context_for_chat`.
+        """
         if config is None:
             config = load_config() 
             
@@ -40,7 +57,12 @@ class ChatManager:
     def update_api_config(self, new_api_key=None, new_model_name=None):
         """
         Updates the API key and/or model name and re-initializes the LLM client.
-        Pass None or empty string for new_api_key to clear it.
+
+        Args:
+            new_api_key (str, optional): The new OpenRouter API key.
+                                         Pass None or an empty string to clear the key.
+            new_model_name (str, optional): The new model name to use.
+                                            If None, the existing model name is retained.
         """
         key_updated = False
         model_updated = False
@@ -181,9 +203,26 @@ class ChatManager:
         return display_history
 
     def clear_history(self):
+        """Clears the chat history."""
         self.chat_history = []
 
     def request_test_generation(self, item_name, item_type, item_code_snippet=None, framework="pytest"):
+        """
+        Requests the LLM to generate unit tests for a given code item.
+
+        Args:
+            item_name (str): The name of the function or class to generate tests for.
+            item_type (str): The type of the code item (e.g., "function", "class").
+            item_code_snippet (str, optional): The actual code snippet of the item.
+                                               Currently, this is not fully utilized in the prompt
+                                               if None, but designed for future enhancement.
+            framework (str, optional): The testing framework to use (e.g., "pytest", "unittest").
+                                       Defaults to "pytest".
+
+        Returns:
+            str: A string containing the generated test code, or an error message prefixed with "# Error:"
+                 if generation fails or the client is not initialized.
+        """
         if self.initialization_error:
             return f"# Error: LLM Client not initialized. {self.initialization_error}"
         if not self.llm_client:
@@ -230,6 +269,25 @@ class ChatManager:
             return f"# Error generating tests for {item_name}: {str(e)}"
 
     def request_command_suggestions(self, context_signals):
+        """
+        Requests command suggestions from the LLM based on provided context signals.
+
+        Args:
+            context_signals (dict): A dictionary containing various pieces of context
+                                    from the UI, such as:
+                                    - "current_tab": Name of the active UI tab.
+                                    - "context_files": Summary of files in the user's context.
+                                    - "recent_chat_history": Last few chat messages.
+                                    - "active_analysis": Summary of any active code analysis.
+                                    - "available_commands": A list of (name, description) tuples
+                                      for commands the user can run.
+
+        Returns:
+            list: A list of suggested command names (strings) that are present in
+                  the `available_commands` from `context_signals`. Returns an empty
+                  list if no relevant suggestions are found, if the LLM client is not
+                  initialized, or if an error occurs during the process.
+        """
         if self.initialization_error:
             # Log or handle this state appropriately if needed beyond returning empty
             # print(f"Cmd Suggestion Error: LLM Client not initialized. {self.initialization_error}")
