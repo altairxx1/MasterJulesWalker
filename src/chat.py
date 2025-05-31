@@ -1,3 +1,4 @@
+import re # Added for @include directive parsing
 from .llm import OpenRouterClient
 from .prompts import format_chat_messages, DEFAULT_SYSTEM_PROMPT
 from .config import load_config # To get API key and model for the client
@@ -98,6 +99,30 @@ class ChatManager:
         if not user_input or user_input.strip() == "":
             return "Error: User input cannot be empty."
 
+        # Parse @include directives
+        include_pattern = re.compile(r'@include\s+([\w\/\.\-\_]+)')
+        included_filepaths = include_pattern.findall(user_input)
+
+        file_processing_messages = []
+        if included_filepaths:
+            for filepath in included_filepaths:
+                status_message = ""
+                if self.ui_reference and hasattr(self.ui_reference, 'add_file_to_context'):
+                    try:
+                        status_message = self.ui_reference.add_file_to_context(filepath)
+                    except Exception as e: # Catch potential errors from the UI method itself
+                        status_message = f"Error processing file {filepath} through UI: {e}"
+                else:
+                    status_message = f"Error: UI context processing not available for {filepath}."
+                if status_message: # Ensure we don't add empty messages
+                    file_processing_messages.append(status_message)
+
+        # Prepare the context update message to prepend to LLM response
+        context_update_message = ""
+        if file_processing_messages:
+            context_update_message = "Context Update:\n" + "\n".join(file_processing_messages) + "\n\n"
+        # The old 'detection_message' is now replaced by 'context_update_message'
+
         # Add user's current message to history before sending, so it's part of the context for the LLM
         # (unless API expects only *prior* history)
         # For typical chat, user's current message is part of the 'messages' payload
@@ -124,16 +149,20 @@ class ChatManager:
             if assistant_response:
                 # Add user's message and assistant's response to internal history *after* successful call
                 self.add_message_to_history("user", user_input)
-                self.add_message_to_history("assistant", assistant_response)
-                return assistant_response
+                # Prepend context update message if any files were processed
+                final_response = context_update_message + assistant_response
+                self.add_message_to_history("assistant", final_response) # Store the potentially modified response
+                return final_response
             else:
                 # This case should ideally be covered by exceptions in OpenRouterClient
-                return "Error: Received no response or empty response from LLM."
+                # If there's a context update message, still return it with the error.
+                return context_update_message + "Error: Received no response or empty response from LLM."
 
         except Exception as e:
             # Log the full error for debugging if needed: print(f"ChatManager Error: {e}")
+            # If there's a context update message, still return it with the error.
             # For the UI, return a user-friendly error message
-            return f"Error communicating with LLM: {str(e)}"
+            return context_update_message + f"Error communicating with LLM: {str(e)}"
 
     def get_formatted_history(self):
         """Returns chat history suitable for display (e.g., list of strings)."""

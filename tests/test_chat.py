@@ -27,6 +27,8 @@ class TestChatManager(unittest.TestCase):
 
         self.ui_reference_mock = MagicMock()
         self.ui_reference_mock.get_current_context_for_chat.return_value = ""
+        # Add mock for add_file_to_context for @include tests
+        self.ui_reference_mock.add_file_to_context = MagicMock()
 
         self.patcher_format_chat = patch('src.chat.format_chat_messages')
         self.mock_format_chat_messages = self.patcher_format_chat.start()
@@ -338,6 +340,130 @@ class TestChatManager(unittest.TestCase):
             history=history_before_second_call, # Pass the history as it was before this call
             context_string=""
         )
+
+    # --- Tests for @include functionality ---
+
+    def test_parse_include_directives(self):
+        """
+        Tests that add_file_to_context is called with correctly parsed filepaths.
+        """
+        self.mock_llm_client_instance.send_chat_request.return_value = "LLM base response."
+        # Reset mock for each scenario
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+        # Scenario 1: No @include directives
+        self.chat_manager.send_message("Hello world")
+        self.ui_reference_mock.add_file_to_context.assert_not_called()
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+        # Scenario 2: One @include directive
+        self.chat_manager.send_message("Please check @include path/to/file1.py")
+        self.ui_reference_mock.add_file_to_context.assert_called_once_with("path/to/file1.py")
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+        # Scenario 3: Multiple @include directives
+        user_input_multiple = "Analyze @include path/file.txt and @include another/doc.md thanks"
+        self.chat_manager.send_message(user_input_multiple)
+        expected_calls = [call("path/file.txt"), call("another/doc.md")]
+        self.ui_reference_mock.add_file_to_context.assert_has_calls(expected_calls, any_order=True) # Order can vary based on regex.findall
+        self.assertEqual(self.ui_reference_mock.add_file_to_context.call_count, 2)
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+        # Scenario 4: @include with various valid path characters
+        self.chat_manager.send_message("Include @include project_A/src-v2/file_name.py and @include docs/API-reference.v1.md")
+        expected_calls_complex = [
+            call("project_A/src-v2/file_name.py"),
+            call("docs/API-reference.v1.md")
+        ]
+        self.ui_reference_mock.add_file_to_context.assert_has_calls(expected_calls_complex, any_order=True)
+        self.assertEqual(self.ui_reference_mock.add_file_to_context.call_count, 2)
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+        # Scenario 5: @include at start, middle, and end
+        self.chat_manager.send_message("@include first.txt then text @include mid/file.py and finally @include end_doc.c")
+        expected_calls_positions = [
+            call("first.txt"),
+            call("mid/file.py"),
+            call("end_doc.c")
+        ]
+        self.ui_reference_mock.add_file_to_context.assert_has_calls(expected_calls_positions, any_order=True)
+        self.assertEqual(self.ui_reference_mock.add_file_to_context.call_count, 3)
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+
+    def test_send_message_with_include_processing(self):
+        """
+        Tests that messages from add_file_to_context are prepended to the LLM response.
+        """
+        user_input = "Analyze @include file1.py and @include file2.txt"
+        llm_response = "LLM analysis complete."
+        self.mock_llm_client_instance.send_chat_request.return_value = llm_response
+
+        # Configure mock add_file_to_context responses
+        def side_effect_func(filepath):
+            if filepath == "file1.py":
+                return "Successfully added file1.py"
+            elif filepath == "file2.txt":
+                return "Error: file2.txt not found"
+            return "Unknown file"
+        self.ui_reference_mock.add_file_to_context.side_effect = side_effect_func
+
+        response = self.chat_manager.send_message(user_input)
+
+        expected_prefix = "Context Update:\nSuccessfully added file1.py\nError: file2.txt not found\n\n"
+        self.assertTrue(response.startswith(expected_prefix))
+        self.assertTrue(response.endswith(llm_response))
+
+        # Ensure add_file_to_context was called for both files
+        self.ui_reference_mock.add_file_to_context.assert_any_call("file1.py")
+        self.ui_reference_mock.add_file_to_context.assert_any_call("file2.txt")
+        self.assertEqual(self.ui_reference_mock.add_file_to_context.call_count, 2)
+
+        # Test with an API error to ensure prefix is still added
+        self.ui_reference_mock.add_file_to_context.reset_mock()
+        self.ui_reference_mock.add_file_to_context.side_effect = side_effect_func # re-assign
+        api_error_msg = "LLM API is down"
+        self.mock_llm_client_instance.send_chat_request.side_effect = Exception(api_error_msg)
+
+        error_response = self.chat_manager.send_message(user_input)
+        expected_error_prefix = "Context Update:\nSuccessfully added file1.py\nError: file2.txt not found\n\n"
+        self.assertTrue(error_response.startswith(expected_error_prefix))
+        self.assertTrue(error_response.endswith(f"Error communicating with LLM: {api_error_msg}"))
+
+
+    def test_send_message_with_include_no_ui_handler(self):
+        """
+        Tests behavior when ui_reference is None or lacks add_file_to_context.
+        """
+        user_input = "Check @include some/file.py"
+        llm_response = "LLM processed."
+        self.mock_llm_client_instance.send_chat_request.return_value = llm_response
+        self.mock_llm_client_instance.send_chat_request.side_effect = None # Clear previous side_effect
+
+        # Scenario 1: ui_reference is None
+        original_ui_ref = self.chat_manager.ui_reference
+        self.chat_manager.ui_reference = None
+
+        response_no_ui = self.chat_manager.send_message(user_input)
+        expected_msg_no_ui = "Context Update:\nError: UI context processing not available for some/file.py\n\n"
+        self.assertTrue(response_no_ui.startswith(expected_msg_no_ui))
+        self.assertTrue(response_no_ui.endswith(llm_response))
+
+        self.chat_manager.ui_reference = original_ui_ref # Restore
+
+        # Scenario 2: ui_reference lacks add_file_to_context method
+        original_add_file_method = self.ui_reference_mock.add_file_to_context
+        del self.ui_reference_mock.add_file_to_context
+        # or self.ui_reference_mock.add_file_to_context = None # this works if hasattr checks for callable
+        # or use a new mock that doesn't have it:
+        # temp_mock_ui = MagicMock(spec=[]) # spec ensures it only has attrs explicitly defined
+        # self.chat_manager.ui_reference = temp_mock_ui
+
+        response_no_method = self.chat_manager.send_message(user_input)
+        expected_msg_no_method = "Context Update:\nError: UI context processing not available for some/file.py\n\n"
+        self.assertTrue(response_no_method.startswith(expected_msg_no_method))
+        self.assertTrue(response_no_method.endswith(llm_response))
+
+        self.ui_reference_mock.add_file_to_context = original_add_file_method # Restore
 
 
 if __name__ == '__main__':

@@ -645,6 +645,30 @@ class TerminalUI:
                 self.active_file_viewer = None
             # Potentially close context_manager if it held resources, but it doesn't currently (no open files)
 
+    def add_file_to_context(self, filepath: str) -> str:
+        """
+        Adds a file to the context manager and returns a status message.
+        This method is intended to be called by ChatManager.
+        """
+        if not self.context_manager:
+            return f"Error: ContextManager not available for {os.path.basename(filepath)}."
+
+        success = self.context_manager.add_file(filepath)
+        message = self.context_manager.get_latest_error()
+
+        if success:
+            # If add_file succeeded, and error message is None or doesn't reflect success for *this* file,
+            # provide a clear success message.
+            # ContextManager.get_latest_error() might hold an old error if not cleared on success.
+            return f"Successfully added {os.path.basename(filepath)} to context."
+        else:
+            # If add_file failed, message should ideally contain the error.
+            if message:
+                return message
+            else:
+                # Fallback if add_file returns False but no specific error was set.
+                return f"Failed to add {os.path.basename(filepath)} to context."
+
     # Method to be called by ChatManager to get current context
     def get_current_context_for_chat(self):
         if self.context_manager and self.context_manager.context_files:
